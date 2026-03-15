@@ -1,0 +1,501 @@
+#pragma once
+
+#include <cstdint>
+#include <chrono>
+#include <functional>
+
+#include "ciphers_enhanced.cuh"
+
+// ============================================================
+// Helpers
+// ============================================================
+
+static inline uint64_t bf_space_size_cpu(int unknown_bits) {
+  if (unknown_bits < 0) return 0ULL;
+  if (unknown_bits >= 63) return 0ULL;
+  return 1ULL << (uint64_t)unknown_bits;
+}
+
+inline double time_cpu_function(const std::function<void()>& func, int repeats) {
+  if (repeats <= 0) repeats = 1;
+
+  auto start = std::chrono::high_resolution_clock::now();
+  for (int i = 0; i < repeats; i++) {
+    func();
+  }
+  auto end = std::chrono::high_resolution_clock::now();
+
+  std::chrono::duration<double> diff = end - start;
+  return diff.count() / (double)repeats;
+}
+
+struct CpuBFResult {
+  bool found = false;
+  uint64_t found_key = 0;
+  double seconds = 0.0;
+  uint64_t keys_tested = 0;
+};
+
+namespace cpu_bf_detail {
+static volatile uint64_t g_sink_u64 = 0;
+
+inline void mix_sink_u64(uint64_t v) {
+  g_sink_u64 ^= (v + 0x9e3779b97f4a7c15ULL);
+}
+
+inline void key64_to_key80_zero_hi16(uint64_t key64, uint8_t key80[10]) {
+  #pragma unroll
+  for (int j = 0; j < 8; j++) key80[j] = (uint8_t)((key64 >> (8 * j)) & 0xFF);
+  key80[8] = 0;
+  key80[9] = 0;
+}
+
+inline void key64_to_key128_zero_hi64(uint64_t key64, uint8_t key128[16]) {
+  #pragma unroll
+  for (int j = 0; j < 8; j++) key128[j] = (uint8_t)((key64 >> (8 * j)) & 0xFF);
+  #pragma unroll
+  for (int j = 8; j < 16; j++) key128[j] = 0;
+}
+
+inline void key64_to_key256_zero_hi192(uint64_t key64, uint8_t key256[32]) {
+  #pragma unroll
+  for (int j = 0; j < 8; j++) key256[j] = (uint8_t)((key64 >> (8 * j)) & 0xFF);
+  #pragma unroll
+  for (int j = 8; j < 32; j++) key256[j] = 0;
+}
+
+inline void make_target_xor(const uint8_t* pt, const uint8_t* ct, int length, uint8_t* target) {
+  for (int i = 0; i < length; i++) target[i] = (uint8_t)(pt[i] ^ ct[i]);
+}
+
+
+inline bool chacha_match_prefix_words4_host(const uint32_t out4[4], const uint8_t* target, int len) {
+  int n = (len > 16) ? 16 : len;
+  for (int i = 0; i < n; i++) {
+    uint8_t b = (uint8_t)((out4[i >> 2] >> (8 * (i & 3))) & 0xFFu);
+    if (b != target[i]) return false;
+  }
+  return true;
+}
+}  // namespace cpu_bf_detail
+
+// ============================================================
+// CPU brute force for SIMON 32/64
+// Full-space scan for stable throughput measurement.
+// ============================================================
+
+inline CpuBFResult brute_force_cpu_simon(uint32_t pt, uint32_t ct,
+                                         uint64_t known_high, int unknown_bits,
+                                         int repeats) {
+  CpuBFResult res;
+  const uint64_t N = bf_space_size_cpu(unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+
+  const uint64_t base_key = (known_high << (uint64_t)unknown_bits);
+
+  auto search_func = [&]() {
+    bool found = false;
+    uint64_t found_key = 0;
+    uint64_t local_acc = 0;
+
+    for (uint64_t i = 0; i < N; i++) {
+      const uint64_t k = base_key | i;
+      uint16_t rk[SIMON32_64_ROUNDS];
+      Simon32_64_Enhanced::expand_key_vectorized(k, rk);
+      const uint32_t out = Simon32_64_Enhanced::encrypt_optimized(pt, rk);
+      local_acc ^= ((uint64_t)out << (i & 7));
+
+      if (!found && out == ct) {
+        found = true;
+        found_key = k;
+      }
+    }
+
+    res.found = found;
+    res.found_key = found_key;
+    cpu_bf_detail::mix_sink_u64(local_acc ^ found_key);
+  };
+
+  res.seconds = time_cpu_function(search_func, repeats);
+  return res;
+}
+
+// ============================================================
+// CPU brute force for PRESENT-80 (low 64 bits vary, high 16 bits = 0)
+// Full-space scan for stable throughput measurement.
+// ============================================================
+
+inline CpuBFResult brute_force_cpu_present(uint64_t pt, uint64_t ct,
+                                           uint64_t known_high, int unknown_bits,
+                                           int repeats) {
+  CpuBFResult res;
+  const uint64_t N = bf_space_size_cpu(unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+
+  const uint64_t base_key = (known_high << (uint64_t)unknown_bits);
+
+  auto search_func = [&]() {
+    bool found = false;
+    uint64_t found_key = 0;
+    uint64_t local_acc = 0;
+
+    for (uint64_t i = 0; i < N; i++) {
+      const uint64_t k = base_key | i;
+      uint8_t key[10];
+      cpu_bf_detail::key64_to_key80_zero_hi16(k, key);
+
+      const uint64_t out = Present80::encrypt_spbox_otf_host(pt, key);
+      local_acc ^= (out << (i & 7));
+
+      if (!found && out == ct) {
+        found = true;
+        found_key = k;
+      }
+    }
+
+    res.found = found;
+    res.found_key = found_key;
+    cpu_bf_detail::mix_sink_u64(local_acc ^ found_key);
+  };
+
+  res.seconds = time_cpu_function(search_func, repeats);
+  return res;
+}
+
+// ============================================================
+// CPU brute force for Grain v1
+// Full-space scan for stable throughput measurement.
+// ============================================================
+
+inline CpuBFResult brute_force_cpu_grain(const uint8_t* pt, const uint8_t* ct,
+                                         const uint8_t* iv, int length,
+                                         uint64_t known_high, int unknown_bits,
+                                         int repeats) {
+  CpuBFResult res;
+  const uint64_t N = bf_space_size_cpu(unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+
+  const uint64_t base_key = (known_high << (uint64_t)unknown_bits);
+  uint8_t target[64] = {0};
+  cpu_bf_detail::make_target_xor(pt, ct, length, target);
+
+  auto search_func = [&]() {
+    bool found = false;
+    uint64_t found_key = 0;
+    uint64_t local_acc = 0;
+
+    for (uint64_t i = 0; i < N; i++) {
+      const uint64_t k = base_key | i;
+      uint8_t key[10];
+      cpu_bf_detail::key64_to_key80_zero_hi16(k, key);
+
+      const bool match = GrainV1::match_keystream(key, iv, target, length);
+      local_acc ^= ((uint64_t)(match ? 0x9b : 0x41) << (i & 7));
+
+      if (!found && match) {
+        found = true;
+        found_key = k;
+      }
+    }
+
+    res.found = found;
+    res.found_key = found_key;
+    cpu_bf_detail::mix_sink_u64(local_acc ^ found_key);
+  };
+
+  res.seconds = time_cpu_function(search_func, repeats);
+  return res;
+}
+
+// ============================================================
+// CPU brute force for Trivium
+// Full-space scan for stable throughput measurement.
+// ============================================================
+
+inline CpuBFResult brute_force_cpu_trivium(const uint8_t* pt, const uint8_t* ct,
+                                           const uint8_t* iv, int length,
+                                           uint64_t known_high, int unknown_bits,
+                                           int repeats) {
+  CpuBFResult res;
+  const uint64_t N = bf_space_size_cpu(unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+
+  const uint64_t base_key = (known_high << (uint64_t)unknown_bits);
+  uint8_t target[64] = {0};
+  cpu_bf_detail::make_target_xor(pt, ct, length, target);
+
+  auto search_func = [&]() {
+    bool found = false;
+    uint64_t found_key = 0;
+    uint64_t local_acc = 0;
+
+    for (uint64_t i = 0; i < N; i++) {
+      const uint64_t k = base_key | i;
+      uint8_t key[10];
+      cpu_bf_detail::key64_to_key80_zero_hi16(k, key);
+
+      const bool match = Trivium::match_keystream(key, iv, target, length);
+      local_acc ^= ((uint64_t)(match ? 0xd7 : 0x23) << (i & 7));
+
+      if (!found && match) {
+        found = true;
+        found_key = k;
+      }
+    }
+
+    res.found = found;
+    res.found_key = found_key;
+    cpu_bf_detail::mix_sink_u64(local_acc ^ found_key);
+  };
+
+  res.seconds = time_cpu_function(search_func, repeats);
+  return res;
+}
+
+// ============================================================
+// CPU brute force for SPECK64/128
+// Full-space scan for stable throughput measurement.
+// ============================================================
+
+inline CpuBFResult brute_force_cpu_speck(uint64_t pt, uint64_t ct,
+                                         uint64_t known_high, int unknown_bits,
+                                         int repeats) {
+  CpuBFResult res;
+  const uint64_t N = bf_space_size_cpu(unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+
+  const uint64_t base_key = (known_high << (uint64_t)unknown_bits);
+
+  auto search_func = [&]() {
+    bool found = false;
+    uint64_t found_key = 0;
+    uint64_t local_acc = 0;
+
+    for (uint64_t i = 0; i < N; i++) {
+      const uint64_t k = base_key | i;
+      uint8_t key128[16];
+      cpu_bf_detail::key64_to_key128_zero_hi64(k, key128);
+
+      uint32_t rk[SPECK64_128_ROUNDS];
+      Speck64_128::expand_key(key128, rk);
+      const uint64_t out = Speck64_128::encrypt(pt, rk);
+      local_acc ^= (out << (i & 7));
+
+      if (!found && out == ct) {
+        found = true;
+        found_key = k;
+      }
+    }
+
+    res.found = found;
+    res.found_key = found_key;
+    cpu_bf_detail::mix_sink_u64(local_acc ^ found_key);
+  };
+
+  res.seconds = time_cpu_function(search_func, repeats);
+  return res;
+}
+
+// ============================================================
+// CPU brute force for ChaCha20
+// Full-space scan for stable throughput measurement.
+// ============================================================
+
+inline CpuBFResult brute_force_cpu_chacha20(const uint8_t* pt, const uint8_t* ct,
+                                            const uint8_t* nonce12, int length,
+                                            uint64_t known_high, int unknown_bits,
+                                            int repeats) {
+  CpuBFResult res;
+  const uint64_t N = bf_space_size_cpu(unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+
+  const uint64_t base_key = (known_high << (uint64_t)unknown_bits);
+  uint8_t target[64] = {0};
+  cpu_bf_detail::make_target_xor(pt, ct, length, target);
+
+  auto search_func = [&]() {
+    bool found = false;
+    uint64_t found_key = 0;
+    uint64_t local_acc = 0;
+
+    for (uint64_t i = 0; i < N; i++) {
+      const uint64_t k = base_key | i;
+      uint8_t key256[32];
+      cpu_bf_detail::key64_to_key256_zero_hi192(k, key256);
+
+      uint32_t out4[4] = {0, 0, 0, 0};
+      ChaCha20::block_words4(key256, 1u, nonce12, out4);
+      const bool match = cpu_bf_detail::chacha_match_prefix_words4_host(out4, target, length);
+      local_acc ^= ((uint64_t)out4[0] << (i & 7));
+
+      if (!found && match) {
+        found = true;
+        found_key = k;
+      }
+    }
+
+    res.found = found;
+    res.found_key = found_key;
+    cpu_bf_detail::mix_sink_u64(local_acc ^ found_key);
+  };
+
+  res.seconds = time_cpu_function(search_func, repeats);
+  return res;
+}
+
+// ============================================================
+// CPU brute force for TinyJAMBU-128 (AEAD)
+// Matches ciphertext output AND 8-byte authentication tag.
+// ============================================================
+
+inline CpuBFResult brute_force_cpu_tinyjambu(const uint8_t* pt, const uint8_t* ct,
+                                             const uint8_t* nonce12, int length,
+                                             const uint8_t* expected_tag,
+                                             const uint8_t* ad, int ad_len,
+                                             uint64_t known_high, int unknown_bits,
+                                             int repeats) {
+  CpuBFResult res;
+  const uint64_t N = bf_space_size_cpu(unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+
+  const uint64_t base_key = (known_high << (uint64_t)unknown_bits);
+
+  auto search_func = [&]() {
+    bool found = false;
+    uint64_t found_key = 0;
+    uint64_t local_acc = 0;
+
+    for (uint64_t i = 0; i < N; i++) {
+      const uint64_t k = base_key | i;
+      uint8_t key[16] = {0};
+      cpu_bf_detail::key64_to_key128_zero_hi64(k, key);
+
+      uint8_t out_ct[64];
+      uint8_t out_tag[8];
+      TinyJAMBU128::encrypt(pt, out_ct, length, out_tag, key, nonce12, ad, ad_len);
+
+      bool match = true;
+      for (int j = 0; j < length; j++) {
+        if (out_ct[j] != ct[j]) { match = false; break; }
+      }
+      if (match) {
+        for (int j = 0; j < 8; j++) {
+          if (out_tag[j] != expected_tag[j]) { match = false; break; }
+        }
+      }
+
+      local_acc ^= ((uint64_t)out_tag[0] << (i & 7));
+
+      if (!found && match) {
+        found = true;
+        found_key = k;
+      }
+    }
+
+    res.found = found;
+    res.found_key = found_key;
+    cpu_bf_detail::mix_sink_u64(local_acc ^ found_key);
+  };
+
+  res.seconds = time_cpu_function(search_func, repeats);
+  return res;
+}
+
+// ============================================================
+// CPU brute force for ZUC-128 (128-bit key, 128-bit IV)
+// Full-space scan for stable throughput measurement.
+// ============================================================
+
+inline CpuBFResult brute_force_cpu_zuc(const uint8_t* pt, const uint8_t* ct,
+                                       const uint8_t* iv, int length,
+                                       uint64_t known_high, int unknown_bits,
+                                       int repeats) {
+  CpuBFResult res;
+  const uint64_t N = bf_space_size_cpu(unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+
+  const uint64_t base_key = (known_high << (uint64_t)unknown_bits);
+  uint8_t target[64] = {0};
+  cpu_bf_detail::make_target_xor(pt, ct, length, target);
+
+  auto search_func = [&]() {
+    bool found = false;
+    uint64_t found_key = 0;
+    uint64_t local_acc = 0;
+
+    for (uint64_t i = 0; i < N; i++) {
+      const uint64_t k = base_key | i;
+      uint8_t key[16] = {0};
+      cpu_bf_detail::key64_to_key128_zero_hi64(k, key);
+
+      const bool match = ZUC::match_keystream(key, iv, target, length);
+      local_acc ^= ((uint64_t)(match ? 0xa7 : 0x31) << (i & 7));
+
+      if (!found && match) {
+        found = true;
+        found_key = k;
+      }
+    }
+
+    res.found = found;
+    res.found_key = found_key;
+    cpu_bf_detail::mix_sink_u64(local_acc ^ found_key);
+  };
+
+  res.seconds = time_cpu_function(search_func, repeats);
+  return res;
+}
+
+// ============================================================
+// CPU brute force for SNOW-V (256-bit key, 128-bit IV)
+// Full-space scan for stable throughput measurement.
+// ============================================================
+
+inline CpuBFResult brute_force_cpu_snow_v(const uint8_t* pt, const uint8_t* ct,
+                                          const uint8_t* iv, int length,
+                                          uint64_t known_high, int unknown_bits,
+                                          int repeats) {
+  CpuBFResult res;
+  const uint64_t N = bf_space_size_cpu(unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+
+  const uint64_t base_key = (known_high << (uint64_t)unknown_bits);
+  uint8_t target[64] = {0};
+  cpu_bf_detail::make_target_xor(pt, ct, length, target);
+
+  auto search_func = [&]() {
+    bool found = false;
+    uint64_t found_key = 0;
+    uint64_t local_acc = 0;
+
+    for (uint64_t i = 0; i < N; i++) {
+      const uint64_t k = base_key | i;
+      uint8_t key[32] = {0};
+      cpu_bf_detail::key64_to_key256_zero_hi192(k, key);
+
+      const bool match = SNOW_V::match_keystream(key, iv, target, length);
+      local_acc ^= ((uint64_t)(match ? 0xc3 : 0x55) << (i & 7));
+
+      if (!found && match) {
+        found = true;
+        found_key = k;
+      }
+    }
+
+    res.found = found;
+    res.found_key = found_key;
+    cpu_bf_detail::mix_sink_u64(local_acc ^ found_key);
+  };
+
+  res.seconds = time_cpu_function(search_func, repeats);
+  return res;
+}
