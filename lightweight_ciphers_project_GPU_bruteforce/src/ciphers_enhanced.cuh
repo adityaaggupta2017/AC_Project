@@ -1360,6 +1360,32 @@ struct SNOW_V {
     result[3] = t30 ^ rotl32(t01, 8) ^ rotl32(t12,16) ^ rotl32(t23,24);
   }
 
+  // Naive AES round: byte-by-byte SubBytes + ShiftRows + MixColumns (no T-tables)
+  __host__ __device__ static inline uint8_t xtime(uint8_t a) {
+    return (a & 0x80) ? ((a << 1) ^ 0x1b) : (a << 1);
+  }
+  __host__ __device__ static void aes_enc_round_naive(uint32_t result[4], const uint32_t state[4]) {
+    // SubBytes + ShiftRows: output column c gets row r from input column (c+r)%4
+    uint8_t sb[4][4];
+    #pragma unroll
+    for (int r = 0; r < 4; r++) {
+      #pragma unroll
+      for (int c = 0; c < 4; c++) {
+        sb[c][r] = sbox((state[(c + r) & 3] >> (r * 8)) & 0xFF);
+      }
+    }
+    // MixColumns: standard AES matrix over GF(2^8)
+    #pragma unroll
+    for (int c = 0; c < 4; c++) {
+      uint8_t a0=sb[c][0], a1=sb[c][1], a2=sb[c][2], a3=sb[c][3];
+      uint8_t r0 = xtime(a0) ^ xtime(a1)^a1 ^ a2        ^ a3;
+      uint8_t r1 = a0        ^ xtime(a1) ^ xtime(a2)^a2 ^ a3;
+      uint8_t r2 = a0        ^ a1        ^ xtime(a2)     ^ xtime(a3)^a3;
+      uint8_t r3 = xtime(a0)^a0          ^ a1            ^ a2       ^ xtime(a3);
+      result[c] = (uint32_t)r0 | ((uint32_t)r1<<8) | ((uint32_t)r2<<16) | ((uint32_t)r3<<24);
+    }
+  }
+
   // Sigma permutation (matrix transpose of the 4x4 byte state)
   __host__ __device__ static inline void permute_sigma(uint32_t state[4]) {
     uint32_t s0=state[0], s1=state[1], s2=state[2], s3=state[3];
@@ -1369,6 +1395,7 @@ struct SNOW_V {
     state[3]=(s0>>24)|((s1&0xFF000000)>>16)|((s2&0xFF000000)>>8)|(s3&0xFF000000);
   }
 
+  template<bool UseTTable>
   __host__ __device__ static void fsm_update(State& s) {
     uint32_t R1temp[4];
     #pragma unroll
@@ -1379,8 +1406,13 @@ struct SNOW_V {
       s.R1[i] = (T2 ^ s.R3[i]) + s.R2[i];
     }
     permute_sigma(s.R1);
-    aes_enc_round(s.R3, s.R2);
-    aes_enc_round(s.R2, R1temp);
+    if constexpr (UseTTable) {
+      aes_enc_round(s.R3, s.R2);
+      aes_enc_round(s.R2, R1temp);
+    } else {
+      aes_enc_round_naive(s.R3, s.R2);
+      aes_enc_round_naive(s.R2, R1temp);
+    }
   }
 
   __host__ __device__ static inline void lfsr_update(State& s) {
@@ -1395,6 +1427,7 @@ struct SNOW_V {
   }
 
   // Generate 16 bytes of keystream
+  template<bool UseTTable>
   __host__ __device__ static inline void keystream(State& s, uint8_t z[16]) {
     #pragma unroll
     for (int i = 0; i < 4; i++) {
@@ -1403,10 +1436,11 @@ struct SNOW_V {
       z[i*4+0]=(uint8_t)(v&0xff); z[i*4+1]=(uint8_t)((v>>8)&0xff);
       z[i*4+2]=(uint8_t)((v>>16)&0xff); z[i*4+3]=(uint8_t)((v>>24)&0xff);
     }
-    fsm_update(s);
+    fsm_update<UseTTable>(s);
     lfsr_update(s);
   }
 
+  template<bool UseTTable>
   __host__ __device__ static inline void init(State& s, const uint8_t key[32], const uint8_t iv[16]) {
     #pragma unroll
     for (int i = 0; i < 8; i++) {
@@ -1419,7 +1453,7 @@ struct SNOW_V {
     for (int i = 0; i < 4; i++) s.R1[i] = s.R2[i] = s.R3[i] = 0;
     #pragma unroll
     for (int i = 0; i < 16; i++) {
-      uint8_t z[16]; keystream(s, z);
+      uint8_t z[16]; keystream<UseTTable>(s, z);
       #pragma unroll
       for (int j = 0; j < 8; j++) s.A[j+8] ^= load16_le(z + 2*j);
       if (i == 14) { for (int j = 0; j < 4; j++) s.R1[j] ^= load32_le_snow(key + 4*j); }
@@ -1427,33 +1461,35 @@ struct SNOW_V {
     }
   }
 
+  template<bool UseTTable>
   __host__ __device__ static inline void process(const uint8_t* pt, uint8_t* ct, int len,
                                                  const uint8_t key[32], const uint8_t iv[16]) {
-    State s; init(s, key, iv);
+    State s; init<UseTTable>(s, key, iv);
     int blocks = len / 16, rem = len % 16;
     for (int i = 0; i < blocks; i++) {
-      uint8_t z[16]; keystream(s, z);
+      uint8_t z[16]; keystream<UseTTable>(s, z);
       #pragma unroll
       for (int j = 0; j < 16; j++) ct[16*i+j] = pt[16*i+j] ^ z[j];
     }
     if (rem > 0) {
-      uint8_t z[16]; keystream(s, z);
+      uint8_t z[16]; keystream<UseTTable>(s, z);
       for (int j = 0; j < rem; j++) ct[16*blocks+j] = pt[16*blocks+j] ^ z[j];
     }
   }
 
   // Early-exit keystream matching for GPU brute-force
+  template<bool UseTTable>
   __host__ __device__ static bool match_keystream(const uint8_t key[32], const uint8_t iv[16],
                                                   const uint8_t* target, int len) {
-    State s; init(s, key, iv);
+    State s; init<UseTTable>(s, key, iv);
     int blocks = len / 16, rem = len % 16;
     for (int i = 0; i < blocks; i++) {
-      uint8_t z[16]; keystream(s, z);
+      uint8_t z[16]; keystream<UseTTable>(s, z);
       #pragma unroll
       for (int j = 0; j < 16; j++) if (z[j] != target[16*i+j]) return false;
     }
     if (rem > 0) {
-      uint8_t z[16]; keystream(s, z);
+      uint8_t z[16]; keystream<UseTTable>(s, z);
       for (int j = 0; j < rem; j++) if (z[j] != target[16*blocks+j]) return false;
     }
     return true;

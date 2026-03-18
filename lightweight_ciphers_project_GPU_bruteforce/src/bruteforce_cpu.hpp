@@ -482,7 +482,7 @@ inline CpuBFResult brute_force_cpu_snow_v(const uint8_t* pt, const uint8_t* ct,
       uint8_t key[32] = {0};
       cpu_bf_detail::key64_to_key256_zero_hi192(k, key);
 
-      const bool match = SNOW_V::match_keystream(key, iv, target, length);
+      const bool match = SNOW_V::match_keystream<true>(key, iv, target, length);
       local_acc ^= ((uint64_t)(match ? 0xc3 : 0x55) << (i & 7));
 
       if (!found && match) {

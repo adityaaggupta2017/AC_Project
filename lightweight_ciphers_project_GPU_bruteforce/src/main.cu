@@ -398,7 +398,7 @@ static TestVector_SnowV snow_v_bench_tv() {
   const char* msg = "Hello SNOW-V!";
   tv.length = (int)strlen(msg);
   memcpy(tv.pt, msg, tv.length);
-  SNOW_V::process(tv.pt, tv.ct, tv.length, tv.key, tv.iv);
+  SNOW_V::process<true>(tv.pt, tv.ct, tv.length, tv.key, tv.iv);
   return tv;
 }
 
@@ -580,7 +580,7 @@ static bool self_test_snow_v() {
 
   uint8_t pt_zeros[128] = {0};
   uint8_t computed[128] = {0};
-  SNOW_V::process(pt_zeros, computed, 128, tv.key, tv.iv);
+  SNOW_V::process<true>(pt_zeros, computed, 128, tv.key, tv.iv);
 
   bool pass = (memcmp(computed, tv.expected_ks, 128) == 0);
   std::cout << "SNOW-V Self-Test: " << (pass ? "PASS" : "FAIL") << "\n";

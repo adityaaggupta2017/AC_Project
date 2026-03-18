@@ -738,7 +738,7 @@ __device__ inline void try_key_snow_v(const uint8_t* pt, const uint8_t* ct, int 
   for (int j = 0; j < 8; j++) key[j] = (uint8_t)((key64 >> (j * 8)) & 0xFF);
 
   uint8_t out[64];
-  SNOW_V::process(pt, out, length, key, iv);
+  SNOW_V::process<false>(pt, out, length, key, iv);
 
   bool match = true;
   for (int j = 0; j < length; j++) {
@@ -776,7 +776,7 @@ __global__ void bf_kernel_snow_v_match(const uint8_t* target, int data_len, cons
     #pragma unroll
     for (int i = 0; i < 8; i++) key[i] = (uint8_t)((key64 >> (8 * i)) & 0xFF);
 
-    if (SNOW_V::match_keystream(key, iv16, target, data_len)) {
+    if (SNOW_V::match_keystream<true>(key, iv16, target, data_len)) {
       if (atomicCAS((int*)d_found, 0, 1) == 0) *d_found_key = key64;
     }
   };
