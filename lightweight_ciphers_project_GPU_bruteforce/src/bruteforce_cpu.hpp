@@ -499,3 +499,49 @@ inline CpuBFResult brute_force_cpu_snow_v(const uint8_t* pt, const uint8_t* ct,
   res.seconds = time_cpu_function(search_func, repeats);
   return res;
 }
+
+// ============================================================
+// CPU brute force for AES-128 (128-bit block, 128-bit key brute-force on low 64 bits)
+// Full-space scan for stable throughput measurement.
+// ============================================================
+
+inline CpuBFResult brute_force_cpu_aes(const uint8_t* pt, const uint8_t* ct,
+                                       uint64_t known_high, int unknown_bits,
+                                       int repeats) {
+  CpuBFResult res;
+  const uint64_t N = bf_space_size_cpu(unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+
+  const uint64_t base_key = (known_high << (uint64_t)unknown_bits);
+
+  auto search_func = [&]() {
+    bool found = false;
+    uint64_t found_key = 0;
+    uint64_t local_acc = 0;
+
+    for (uint64_t i = 0; i < N; i++) {
+      uint64_t k = base_key | i;
+      uint8_t key[16];
+      cpu_bf_detail::key64_to_key128_zero_hi64(k, key);
+
+      uint8_t ct_computed[16];
+      AES128::encrypt<true>(pt, key, ct_computed);
+
+      const bool match = (memcmp(ct_computed, ct, 16) == 0);
+      local_acc ^= ((uint64_t)(match ? 0xaa : 0x55) << (i & 7));
+
+      if (!found && match) {
+        found = true;
+        found_key = k;
+      }
+    }
+
+    res.found = found;
+    res.found_key = found_key;
+    cpu_bf_detail::mix_sink_u64(local_acc ^ found_key);
+  };
+
+  res.seconds = time_cpu_function(search_func, repeats);
+  return res;
+}

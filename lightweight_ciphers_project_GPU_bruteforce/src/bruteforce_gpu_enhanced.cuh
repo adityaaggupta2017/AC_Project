@@ -442,7 +442,8 @@ enum class CipherType {
   CHACHA20,
   TINYJAMBU_128,
   SNOW_V,
-  ZUC_128
+  ZUC_128,
+  AES_128
 };
 
 // ============================================================
@@ -791,6 +792,129 @@ __global__ void bf_kernel_snow_v_match(const uint8_t* target, int data_len, cons
   }
 }
 
+// ============================================================
+// AES-128 GPU Kernels (block cipher, 128-bit block/key)
+// ============================================================
+
+__device__ __forceinline__ void key64_to_aes_key_dev(uint64_t key64, uint8_t key[16]) {
+  #pragma unroll
+  for (int j = 0; j < 8; j++) key[j] = (uint8_t)((key64 >> (j * 8)) & 0xFFu);
+  #pragma unroll
+  for (int j = 8; j < 16; j++) key[j] = 0u;
+}
+
+__device__ __forceinline__ uint32_t aes_rot_right(uint32_t val, uint32_t selector) {
+    return __byte_perm(val, val, selector);
+}
+
+__device__ __forceinline__ void aes128_encrypt_tezcan(
+    const uint8_t* pt, const uint32_t* rk, uint8_t* ct,
+    const uint32_t T0_shr[256][32], const uint8_t S_shr[64][32][4])
+{
+    int lane = threadIdx.x % 32;
+
+    uint32_t w0 = ((const uint32_t*)pt)[0] ^ rk[0];
+    uint32_t w1 = ((const uint32_t*)pt)[1] ^ rk[1];
+    uint32_t w2 = ((const uint32_t*)pt)[2] ^ rk[2];
+    uint32_t w3 = ((const uint32_t*)pt)[3] ^ rk[3];
+
+    #pragma unroll
+    for (int round = 1; round < 10; round++) {
+        uint32_t t0 = T0_shr[ w0 & 0xff ][lane] ^
+                      aes_rot_right(T0_shr[ (w1 >> 8) & 0xff ][lane], 0x6543) ^
+                      aes_rot_right(T0_shr[ (w2 >> 16) & 0xff ][lane], 0x5432) ^
+                      aes_rot_right(T0_shr[ w3 >> 24 ][lane], 0x4321) ^ rk[4*round + 0];
+
+        uint32_t t1 = T0_shr[ w1 & 0xff ][lane] ^
+                      aes_rot_right(T0_shr[ (w2 >> 8) & 0xff ][lane], 0x6543) ^
+                      aes_rot_right(T0_shr[ (w3 >> 16) & 0xff ][lane], 0x5432) ^
+                      aes_rot_right(T0_shr[ w0 >> 24 ][lane], 0x4321) ^ rk[4*round + 1];
+
+        uint32_t t2 = T0_shr[ w2 & 0xff ][lane] ^
+                      aes_rot_right(T0_shr[ (w3 >> 8) & 0xff ][lane], 0x6543) ^
+                      aes_rot_right(T0_shr[ (w0 >> 16) & 0xff ][lane], 0x5432) ^
+                      aes_rot_right(T0_shr[ w1 >> 24 ][lane], 0x4321) ^ rk[4*round + 2];
+
+        uint32_t t3 = T0_shr[ w3 & 0xff ][lane] ^
+                      aes_rot_right(T0_shr[ (w0 >> 8) & 0xff ][lane], 0x6543) ^
+                      aes_rot_right(T0_shr[ (w1 >> 16) & 0xff ][lane], 0x5432) ^
+                      aes_rot_right(T0_shr[ w2 >> 24 ][lane], 0x4321) ^ rk[4*round + 3];
+        w0 = t0; w1 = t1; w2 = t2; w3 = t3;
+    }
+
+    // Last round
+    uint32_t f0 = (uint32_t)S_shr[(w0 & 0xff)/4][lane][(w0 & 0xff)%4] |
+                 ((uint32_t)S_shr[((w1 >> 8) & 0xff)/4][lane][((w1 >> 8) & 0xff)%4] << 8) |
+                 ((uint32_t)S_shr[((w2 >> 16) & 0xff)/4][lane][((w2 >> 16) & 0xff)%4] << 16) |
+                 ((uint32_t)S_shr[(w3 >> 24)/4][lane][(w3 >> 24)%4] << 24);
+    f0 ^= rk[40];
+
+    uint32_t f1 = (uint32_t)S_shr[(w1 & 0xff)/4][lane][(w1 & 0xff)%4] |
+                 ((uint32_t)S_shr[((w2 >> 8) & 0xff)/4][lane][((w2 >> 8) & 0xff)%4] << 8) |
+                 ((uint32_t)S_shr[((w3 >> 16) & 0xff)/4][lane][((w3 >> 16) & 0xff)%4] << 16) |
+                 ((uint32_t)S_shr[(w0 >> 24)/4][lane][(w0 >> 24)%4] << 24);
+    f1 ^= rk[41];
+
+    uint32_t f2 = (uint32_t)S_shr[(w2 & 0xff)/4][lane][(w2 & 0xff)%4] |
+                 ((uint32_t)S_shr[((w3 >> 8) & 0xff)/4][lane][((w3 >> 8) & 0xff)%4] << 8) |
+                 ((uint32_t)S_shr[((w0 >> 16) & 0xff)/4][lane][((w0 >> 16) & 0xff)%4] << 16) |
+                 ((uint32_t)S_shr[(w1 >> 24)/4][lane][(w1 >> 24)%4] << 24);
+    f2 ^= rk[42];
+
+    uint32_t f3 = (uint32_t)S_shr[(w3 & 0xff)/4][lane][(w3 & 0xff)%4] |
+                 ((uint32_t)S_shr[((w0 >> 8) & 0xff)/4][lane][((w0 >> 8) & 0xff)%4] << 8) |
+                 ((uint32_t)S_shr[((w1 >> 16) & 0xff)/4][lane][((w1 >> 16) & 0xff)%4] << 16) |
+                 ((uint32_t)S_shr[(w2 >> 24)/4][lane][(w2 >> 24)%4] << 24);
+    f3 ^= rk[43];
+
+    ((uint32_t*)ct)[0] = f0;
+    ((uint32_t*)ct)[1] = f1;
+    ((uint32_t*)ct)[2] = f2;
+    ((uint32_t*)ct)[3] = f3;
+}
+// UseTTable=false → mixcolumns_naive (baseline, no GF bit-trick)
+// UseTTable=true  → mixcolumns_fast  (optimized, gmul2/gmul3 bit-shifts)
+template<bool UseTTable>
+__device__ __forceinline__ void try_key_aes_opt(const uint8_t* pt, const uint8_t* ct, uint64_t key64,
+                                                uint64_t* found_key, int* found_flag) {
+  uint8_t key[16];
+  key64_to_aes_key_dev(key64, key);
+
+  uint8_t ct_computed[16];
+  AES128::encrypt<UseTTable>(pt, key, ct_computed);
+
+  bool match = true;
+  #pragma unroll
+  for (int i = 0; i < 16; i++) {
+    if (ct_computed[i] != ct[i]) match = false;
+  }
+
+  if (match) {
+    atomicExch((unsigned long long*)found_key, (unsigned long long)key64);
+    atomicExch((int*)found_flag, 1);
+  }
+}
+
+template<bool ILP4, bool UseTTable>
+__global__ void bf_kernel_aes_opt(const uint8_t* pt, const uint8_t* ct, uint64_t base_key, uint64_t N,
+                                  uint64_t* found_key, int* found_flag) {
+  const uint64_t tid = (uint64_t)blockIdx.x * (uint64_t)blockDim.x + (uint64_t)threadIdx.x;
+  const uint64_t stride = (uint64_t)gridDim.x * (uint64_t)blockDim.x;
+
+  if constexpr (ILP4) {
+    for (uint64_t k = tid; k < N; k += stride * 4ULL) {
+      try_key_aes_opt<UseTTable>(pt, ct, base_key | k, found_key, found_flag);
+      if (k + stride < N) try_key_aes_opt<UseTTable>(pt, ct, base_key | (k + stride), found_key, found_flag);
+      if (k + stride * 2ULL < N) try_key_aes_opt<UseTTable>(pt, ct, base_key | (k + stride * 2ULL), found_key, found_flag);
+      if (k + stride * 3ULL < N) try_key_aes_opt<UseTTable>(pt, ct, base_key | (k + stride * 3ULL), found_key, found_flag);
+    }
+  } else {
+    for (uint64_t k = tid; k < N; k += stride) {
+      try_key_aes_opt<UseTTable>(pt, ct, base_key | k, found_key, found_flag);
+    }
+  }
+}
+
 inline GpuBFResult brute_force_gpu_enhanced(CipherType cipher,
                                            const void* pt,
                                            const void* ct,
@@ -857,6 +981,14 @@ inline GpuBFResult brute_force_gpu_enhanced(CipherType cipher,
       cuda_check(cudaMemcpy(d_pt, pt, (size_t)data_len, cudaMemcpyHostToDevice), "memcpy pt");
       cuda_check(cudaMemcpy(d_ct, ct, (size_t)data_len, cudaMemcpyHostToDevice), "memcpy ct");
     }
+  }
+
+  // Block cipher (AES-128): allocate 16-byte device buffers for plaintext and ciphertext
+  if (cipher == CipherType::AES_128) {
+    cuda_check(cudaMalloc(&d_pt, 16), "cudaMalloc pt (AES)");
+    cuda_check(cudaMalloc(&d_ct, 16), "cudaMalloc ct (AES)");
+    cuda_check(cudaMemcpy(d_pt, pt, 16, cudaMemcpyHostToDevice), "memcpy pt (AES)");
+    cuda_check(cudaMemcpy(d_ct, ct, 16, cudaMemcpyHostToDevice), "memcpy ct (AES)");
   }
 
   const int use_ilp = (variant == GpuVariant::OPTIMIZED_ILP) ? 1 : 0;
@@ -986,6 +1118,25 @@ inline GpuBFResult brute_force_gpu_enhanced(CipherType cipher,
         }
         break;
 
+      case CipherType::AES_128:
+        if (variant == GpuVariant::BASELINE) {
+          // gpu0_baseline: mixcolumns_naive (no GF bit-trick)
+          bf_kernel_aes_opt<false, false><<<blocks, threads, 0, stream>>>(
+            d_pt, d_ct, base_key, N, d_found_key, d_found_flag
+          );
+        } else if (use_ilp) {
+          // gpu2_optimized+ilp: mixcolumns_fast + ILP4
+          bf_kernel_aes_opt<true, true><<<blocks, threads, 0, stream>>>(
+            d_pt, d_ct, base_key, N, d_found_key, d_found_flag
+          );
+        } else {
+          // gpu1_optimized: mixcolumns_fast, no ILP
+          bf_kernel_aes_opt<false, true><<<blocks, threads, 0, stream>>>(
+            d_pt, d_ct, base_key, N, d_found_key, d_found_flag
+          );
+        }
+        break;
+
       case CipherType::TINYJAMBU_128:
         // AEAD cipher: use brute_force_gpu_enhanced_aead() instead
         break;
@@ -1110,6 +1261,25 @@ inline GpuBFResult brute_force_gpu_enhanced(CipherType cipher,
         } else {
           bf_kernel_snow_v_match<true, true><<<blocks, threads, 0, stream>>>(
             d_target, data_len, d_iv, known_high, unknown_bits, N, d_found_flag, d_found_key
+          );
+        }
+        break;
+
+      case CipherType::AES_128:
+        if (variant == GpuVariant::BASELINE) {
+          // gpu0_baseline: mixcolumns_naive (no GF bit-trick)
+          bf_kernel_aes_opt<false, false><<<blocks, threads, 0, stream>>>(
+            d_pt, d_ct, base_key, N, d_found_key, d_found_flag
+          );
+        } else if (use_ilp) {
+          // gpu2_optimized+ilp: mixcolumns_fast + ILP4
+          bf_kernel_aes_opt<true, true><<<blocks, threads, 0, stream>>>(
+            d_pt, d_ct, base_key, N, d_found_key, d_found_flag
+          );
+        } else {
+          // gpu1_optimized: mixcolumns_fast, no ILP
+          bf_kernel_aes_opt<false, true><<<blocks, threads, 0, stream>>>(
+            d_pt, d_ct, base_key, N, d_found_key, d_found_flag
           );
         }
         break;

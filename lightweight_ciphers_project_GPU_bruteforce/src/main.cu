@@ -103,6 +103,12 @@ struct TestVector_SnowV {
   int length;
 };
 
+struct TestVector_AES {
+  uint8_t key[16];
+  uint8_t pt[16];
+  uint8_t ct[16];
+};
+
 // SIMON 32/64 official test vector
 static TestVector_Simon simon_tv() {
   uint64_t key = 0;
@@ -402,6 +408,37 @@ static TestVector_SnowV snow_v_bench_tv() {
   return tv;
 }
 
+// AES-128 NIST test vector (FIPS 197 Appendix C.1)
+static TestVector_AES aes_tv() {
+  TestVector_AES tv;
+  const uint8_t key[16] = {0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+                            0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c};
+  const uint8_t pt[16]  = {0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d,
+                            0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37, 0x07, 0x34};
+  const uint8_t ct[16]  = {0x39, 0x25, 0x84, 0x1d, 0x02, 0xdc, 0x09, 0xfb,
+                            0xdc, 0x11, 0x85, 0x97, 0x19, 0x6a, 0x0b, 0x32};
+  memcpy(tv.key, key, 16);
+  memcpy(tv.pt, pt, 16);
+  memcpy(tv.ct, ct, 16);
+  return tv;
+}
+
+// AES-128 benchmark TV — low 64 bits = bench_key64_last_candidate, high 64 bits = 0
+static TestVector_AES aes_bench_tv() {
+  TestVector_AES tv;
+  memset(&tv, 0, sizeof(tv));
+  const uint64_t key64 = bench_key64_last_candidate();
+  store_u64_le(key64, tv.key, 8);
+  for (int j = 8; j < 16; j++) tv.key[j] = 0;
+
+  const uint8_t pt[16] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                           0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
+  memcpy(tv.pt, pt, 16);
+
+  AES128::encrypt<true>(tv.pt, tv.key, tv.ct);
+  return tv;
+}
+
 // ============================================================
 // Self-Tests
 // ============================================================
@@ -591,6 +628,19 @@ static bool self_test_snow_v() {
   return pass;
 }
 
+static bool self_test_aes() {
+  auto tv = aes_tv();
+  uint8_t ct[16];
+  AES128::encrypt<true>(tv.pt, tv.key, ct);
+  bool pass = (memcmp(ct, tv.ct, 16) == 0);
+  std::cout << "AES-128 Self-Test: " << (pass ? "PASS" : "FAIL") << "\n";
+  if (!pass) {
+    std::cout << "  Expected: " << bytes_to_hex(tv.ct, 16) << "\n";
+    std::cout << "  Got:      " << bytes_to_hex(ct, 16) << "\n";
+  }
+  return pass;
+}
+
 static bool run_all_self_tests() {
   bool ok = true;
   ok &= self_test_simon();
@@ -603,6 +653,7 @@ static bool run_all_self_tests() {
   ok &= self_test_tinyjambu_bitsliced();
   ok &= self_test_zuc();
   ok &= self_test_snow_v();
+  ok &= self_test_aes();
   return ok;
 }
 
@@ -656,7 +707,7 @@ static Args parse_args(int argc, char** argv) {
     else if (s == "--help" || s == "-h") {
       std::cout
         << "Usage: bench [options]\n"
-        << "  --cipher <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|all> (default: all)\n"
+        << "  --cipher <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|aes|all> (default: all)\n"
         << "  --variants <baseline|optimized|optimized_ilp|shared|all|auto> (default: auto)\n"
         << "  --out results.csv\n"
         << "  --min_bits 1 --max_bits 30 --step_bits 1\n"
@@ -1047,6 +1098,42 @@ static void benchmark_snowv(const Args& a) {
   }
 }
 
+static void benchmark_aes(const Args& a) {
+  printf("\n=== AES-128 Benchmark ===\n");
+  auto tv = aes_bench_tv();
+
+  for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+    uint64_t known_high = 0;
+    printf("\nunknown_bits=%d (keys=%llu)\n", b, bf_space_size_main(b));
+
+    if (a.run_cpu) {
+      auto cr = brute_force_cpu_aes(tv.pt, tv.ct, known_high, b, a.cpu_repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      printf("CPU:               %g s, %g keys/s\n", cr.seconds, kps);
+      std::ostringstream row;
+      row << "aes128,cpu,cpu_baseline," << b << "," << cr.keys_tested << "," << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+
+    if (a.run_gpu) {
+      auto run = [&](GpuVariant v, const char* tag) {
+        auto gr = brute_force_gpu_enhanced(CipherType::AES_128, tv.pt, tv.ct, nullptr, 0,
+                                           known_high, b, v, a.blocks, a.threads, a.gpu_repeats);
+        double kps = safe_kps(gr.keys_tested, gr.seconds);
+        printf("%s: %g s, %g keys/s, found=%s\n", tag, gr.seconds, kps, gr.found ? "yes" : "no");
+        std::ostringstream row;
+        row << "aes128,gpu," << gpu_variant_name(v) << "," << b << "," << gr.keys_tested << "," << gr.seconds << "," << kps << "," << u64_hex(gr.found ? gr.found_key : 0);
+        csv_append_row(a.out_csv, row.str());
+      };
+
+      for (auto v : selected_gpu_variants(a, CipherType::AES_128)) {
+        std::string tag = std::string("GPU ") + gpu_variant_name(v);
+        run(v, tag.c_str());
+      }
+    }
+  }
+}
+
 // ============================================================
 // main
 // ============================================================
@@ -1078,9 +1165,10 @@ int main(int argc, char** argv) {
     else if (name == "tinyjambu") benchmark_tinyjambu(a);
     else if (name == "zuc") benchmark_zuc(a);
     else if (name == "snowv") benchmark_snowv(a);
+    else if (name == "aes") benchmark_aes(a);
     else {
       std::cerr << "Unknown cipher: " << name << "\n";
-      std::cerr << "Valid: simon, present, speck, grain, trivium, chacha, tinyjambu, zuc, snowv, all\n";
+      std::cerr << "Valid: simon, present, speck, grain, trivium, chacha, tinyjambu, zuc, snowv, aes, all\n";
       std::exit(1);
     }
   };
@@ -1095,6 +1183,7 @@ int main(int argc, char** argv) {
     benchmark_tinyjambu(a);
     benchmark_zuc(a);
     benchmark_snowv(a);
+    benchmark_aes(a);
   } else {
     run_one(a.cipher);
   }

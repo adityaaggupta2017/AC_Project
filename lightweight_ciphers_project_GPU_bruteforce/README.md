@@ -1,7 +1,7 @@
 # Lightweight Ciphers — GPU Brute-Force Benchmark
 
-Partial-key brute-force throughput benchmarks (CPU and CUDA GPU) for nine lightweight and
-modern stream ciphers. The project measures how many candidate keys per second each
+Partial-key brute-force throughput benchmarks (CPU and CUDA GPU) for ten lightweight and
+modern stream/block ciphers. The project measures how many candidate keys per second each
 implementation can test, sweeping over a configurable range of unknown key bits.
 
 ---
@@ -19,6 +19,7 @@ implementation can test, sweeping over a configurable range of unknown key bits.
 | 7 | **TinyJAMBU-128** | AEAD | Low 64 of 128-bit key | 96-bit nonce, 64-bit tag; NIST LWC finalist (v2) |
 | 8 | **ZUC-128** | Stream | Low 64 of 128-bit key | 128-bit IV; 3GPP/GSMA (EEA3/EIA3) |
 | 9 | **SNOW-V** | Stream | Low 64 of 256-bit key | 128-bit IV; AES-based FSM |
+| 10 | **AES-128** | Block | Low 64 of 128-bit key | NIST FIPS 197; verified against NIST test vector |
 
 > **Brute-force model:** only the lowest 64 bits of each key are swept; the remaining bits
 > are held fixed at zero. `unknown_bits=N` means the lowest N bits are unknown — the search
@@ -30,16 +31,84 @@ implementation can test, sweeping over a configurable range of unknown key bits.
 
 | Variant flag | Label in CSV | Description |
 |---|---|---|
-| `baseline` | `gpu0_baseline` | 1 key/thread, full process/encrypt call |
-| `optimized` | `gpu1_optimized` | Early-exit keystream comparison (stream ciphers) |
-| `optimized_ilp` | `gpu2_optimized+ilp` | 2 keys per loop iteration (ILP2) + early-exit |
+| `baseline` | `gpu0_baseline` | 1 key/thread, full encrypt call |
+| `optimized` | `gpu1_optimized` | Optimized encrypt (fast MixColumns for AES; early-exit for stream ciphers) |
+| `optimized_ilp` | `gpu2_optimized+ilp` | 4 keys per loop iteration (ILP4) + optimized encrypt |
 | `shared` | `gpu3_optimized+shared` | Shared-memory SP-box table (PRESENT-80 only) |
 | `bitsliced` | `gpu4_bitsliced` | 32 keys per thread via bitsliced permutation (TinyJAMBU-128 only) |
 
 Default `auto` mode selects the most relevant variants per cipher:
 - **PRESENT-80** — baseline, optimized, optimized_ilp, **shared**
 - **TinyJAMBU-128** — baseline, optimized_ilp, **bitsliced**
+- **AES-128** — baseline, optimized, optimized_ilp
 - **All others** — baseline, optimized, optimized_ilp
+
+---
+
+## AES-128 GPU Variant Details
+
+AES-128 is a 10-round SPN block cipher with a 128-bit key and 128-bit block. Each round
+performs: SubBytes → ShiftRows → MixColumns → AddRoundKey. The three GPU variants differ
+in how MixColumns is computed:
+
+### gpu0_baseline — Naive MixColumns (`UseTTable=false`)
+
+MixColumns is implemented using a **general GF(2⁸) multiplication loop**:
+
+```
+gmul(a, b):
+  result = 0
+  for 8 iterations:
+    if b & 1: result ^= a
+    a = (a << 1) ^ (0x1b if a & 0x80 else 0)  # reduce mod x^8+x^4+x^3+x+1
+    b >>= 1
+```
+
+Each of the four MixColumns column outputs requires four `gmul` calls (with factors 1, 2, 3).
+This loop is unrolled by the compiler but involves data-dependent branching and bit-by-bit
+iteration — slower but algorithmically straightforward.
+
+### gpu1_optimized — Fast MixColumns (`UseTTable=true`, no ILP)
+
+MixColumns uses **precomputed bit-shift GF(2⁸) tricks**:
+
+```
+gmul2(a) = (a << 1) ^ (0x1b if a & 0x80)   // multiply by 2 in GF(2^8)
+gmul3(a) = gmul2(a) ^ a                      // multiply by 3 = 2+1
+```
+
+These replace the 8-iteration loop with 2–3 XOR/shift instructions per element.
+The MixColumns column update becomes 8 XOR operations total (no loop, no branch on the key
+data path). This is **significantly faster** on GPUs because:
+- No loop overhead or loop-carried dependency
+- No data-dependent branching in the inner loop
+- Fewer instructions per AES round
+
+### gpu2_optimized+ilp — Fast MixColumns + ILP4
+
+Same fast MixColumns as `gpu1_optimized`, plus **Instruction Level Parallelism (ILP4)**:
+each thread processes **4 candidate keys per loop iteration** instead of 1.
+
+```
+for k in range(tid, N, stride*4):
+    try_key(base | k)
+    try_key(base | (k + stride))
+    try_key(base | (k + stride*2))
+    try_key(base | (k + stride*3))
+```
+
+Because each `try_key` call is independent (different key, no shared state), the GPU's
+out-of-order execution units can overlap memory latency (S-box table loads) across
+the 4 independent AES encryption pipelines. This hides L1/L2 cache miss latency and
+increases arithmetic throughput utilization.
+
+### Summary Table
+
+| Variant | MixColumns | Keys/thread/iter | Throughput |
+|---------|-----------|-----------------|------------|
+| `gpu0_baseline` | Naive (8-iter GF loop) | 1 | Lowest |
+| `gpu1_optimized` | Fast (gmul2/gmul3 bit tricks) | 1 | ~2–4x baseline |
+| `gpu2_optimized+ilp` | Fast (gmul2/gmul3 bit tricks) | 4 | Highest |
 
 ---
 
@@ -52,7 +121,7 @@ lightweight_ciphers_project_GPU_bruteforce/
 ├── plot_results.py
 ├── src/
 │   ├── main.cu                    # Benchmark driver, self-tests, CLI
-│   ├── ciphers_enhanced.cuh       # All nine cipher implementations (host + device)
+│   ├── ciphers_enhanced.cuh       # All ten cipher implementations (host + device)
 │   ├── bruteforce_gpu_enhanced.cuh # GPU kernels, CipherType/GpuVariant enums, launch helpers
 │   ├── bruteforce_cpu.hpp         # CPU brute-force reference implementations
 │   ├── present_spbox_tables.inc   # Pre-generated PRESENT-80 SP-box lookup tables
@@ -102,7 +171,7 @@ cmake --build . -j$(nproc)
 
 ## Self-Tests
 
-Verifies all nine cipher implementations against official test vectors before benchmarking.
+Verifies all ten cipher implementations against official test vectors before benchmarking.
 
 ```bash
 ./bench --test
@@ -120,6 +189,7 @@ TinyJAMBU-128 Self-Test:           PASS
 TinyJAMBU-128 Bitsliced Self-Test: PASS
 ZUC-128 Self-Test:                 PASS
 SNOW-V Self-Test:                  PASS
+AES-128 Self-Test:                 PASS
 ```
 
 ---
@@ -128,7 +198,7 @@ SNOW-V Self-Test:                  PASS
 
 All commands below assume you are inside the `build/` directory.
 
-### Run all 9 ciphers (recommended full benchmark)
+### Run all 10 ciphers (recommended full benchmark)
 
 ```bash
 ./bench --cipher all \
@@ -221,6 +291,24 @@ To benchmark only the bitsliced kernel:
 ./bench --cipher snowv --min_bits 1 --max_bits 20 --step_bits 1 --out ../results_snowv.csv
 ```
 
+#### 10. AES-128
+
+```bash
+./bench --cipher aes --min_bits 1 --max_bits 30 --step_bits 1 --out ../results_aes.csv
+```
+
+Run only specific AES GPU variants:
+```bash
+# Baseline only (naive MixColumns)
+./bench --cipher aes --variants baseline --min_bits 1 --max_bits 30 --out ../results_aes_baseline.csv
+
+# Optimized only (fast MixColumns, no ILP)
+./bench --cipher aes --variants optimized --min_bits 1 --max_bits 30 --out ../results_aes_opt.csv
+
+# ILP4 only (fast MixColumns + ILP4)
+./bench --cipher aes --variants optimized_ilp --min_bits 1 --max_bits 30 --out ../results_aes_ilp.csv
+```
+
 ---
 
 ## Selecting GPU Variants Manually
@@ -229,10 +317,10 @@ To benchmark only the bitsliced kernel:
 # Baseline only
 ./bench --cipher grain --variants baseline
 
-# Optimized (early-exit) only
+# Optimized (early-exit / fast MixColumns) only
 ./bench --cipher trivium --variants optimized
 
-# ILP2 only
+# ILP4 only
 ./bench --cipher chacha --variants optimized_ilp
 
 # Shared-memory (PRESENT-80 only)
@@ -251,7 +339,7 @@ To benchmark only the bitsliced kernel:
 
 ```
 Usage: bench [options]
-  --cipher   <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|all>
+  --cipher   <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|aes|all>
              (default: all)
   --variants <baseline|optimized|optimized_ilp|shared|bitsliced|all|auto>
              (default: auto — best variants per cipher)
@@ -283,6 +371,10 @@ Example rows:
 simon32_64,cpu,cpu_baseline,10,1024,0.000012,85333333,0x0000000000000000
 simon32_64,gpu,gpu0_baseline,10,1024,0.0000031,330322580,0x0000000000000000
 simon32_64,gpu,gpu2_optimized+ilp,10,1024,0.0000019,539000000,0x0000000000000000
+aes_128,cpu,cpu_baseline,10,1024,0.000015,68266666,0x0000000000000000
+aes_128,gpu,gpu0_baseline,10,1024,0.0000058,176551724,0x0000000000000000
+aes_128,gpu,gpu1_optimized,10,1024,0.0000021,487619047,0x0000000000000000
+aes_128,gpu,gpu2_optimized+ilp,10,1024,0.0000014,731428571,0x0000000000000000
 tinyjambu_128,gpu,gpu4_bitsliced,10,1024,0.0000045,227555555,0xa55a12343fffffff
 ```
 
@@ -299,7 +391,7 @@ cd ..   # back to lightweight_ciphers_project_GPU_bruteforce/
 python3 plot_results.py results_all.csv --outdir plots/
 
 # Plot a single cipher
-python3 plot_results.py results_all.csv --only_cipher simon32_64 --outdir plots/
+python3 plot_results.py results_all.csv --only_cipher aes_128 --outdir plots/
 
 # Specify CSV with flag
 python3 plot_results.py --csv results_all.csv --outdir plots/
@@ -320,4 +412,5 @@ Plots are saved as PNG files in the `--outdir` directory:
 | Comparing only GPU variants | Use `--gpu_only` |
 | PRESENT-80 shared-memory study | `--cipher present --variants all` |
 | TinyJAMBU bitsliced study | `--cipher tinyjambu --variants all --max_bits 16` |
+| AES MixColumns optimization study | `--cipher aes --variants all` |
 | Stream cipher comparison | `--cipher grain` then `--cipher trivium` then `--cipher chacha` |
