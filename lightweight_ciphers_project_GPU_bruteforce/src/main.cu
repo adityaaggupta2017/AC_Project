@@ -109,6 +109,20 @@ struct TestVector_AES {
   uint8_t ct[16];
 };
 
+struct TestVector_Salsa20Block {
+  uint8_t key[32];
+  uint8_t nonce[8];
+  uint8_t stream[16]; // first 16 bytes of keystream (counter=0), verified from eSTREAM Set 1
+};
+
+struct TestVector_Salsa20Bench {
+  uint64_t key64;
+  uint8_t nonce[8];
+  uint8_t pt[64];
+  uint8_t ct[64];
+  int length;
+};
+
 // SIMON 32/64 official test vector
 static TestVector_Simon simon_tv() {
   uint64_t key = 0;
@@ -439,6 +453,44 @@ static TestVector_AES aes_bench_tv() {
   return tv;
 }
 
+// Salsa20/20 eSTREAM test vector — Set 1, vector 0 (first 16 bytes only)
+// key[0] = 0x80, key[1..31] = 0; nonce = all zeros; counter = 0
+// These first 16 bytes are verified correct from eSTREAM Set 1, vector 0.
+// Only 16 bytes stored: full 64-byte comparison is replaced by round-trip test below.
+static TestVector_Salsa20Block salsa20_ecrypt_tv() {
+  TestVector_Salsa20Block tv;
+  memset(&tv, 0, sizeof(tv));
+  tv.key[0] = 0x80; // key = {0x80, 0, 0, ..., 0}
+  // nonce = all zeros (already zeroed by memset)
+  // Expected first 16 bytes of keystream (eSTREAM Set 1, vector 0)
+  const uint8_t expected16[16] = {
+    0xE3,0xBE,0x8F,0xDD,0x8B,0xEC,0xA2,0xE3,
+    0xEA,0x8E,0xF9,0x47,0x5B,0x29,0xA6,0xE7
+  };
+  memcpy(tv.stream, expected16, 16);
+  return tv;
+}
+
+// Salsa20 benchmark TV — key = bench_key64_last_candidate, worst-case position
+static TestVector_Salsa20Bench salsa20_bench_tv() {
+  TestVector_Salsa20Bench tv;
+  memset(&tv, 0, sizeof(tv));
+
+  const uint64_t key64 = bench_key64_last_candidate();
+  tv.key64 = key64;
+  tv.nonce[0] = 0x12; tv.nonce[1] = 0x34; tv.nonce[2] = 0x56; tv.nonce[3] = 0x78;
+  // nonce[4..7] already zeroed by memset
+
+  const char* msg = "Hello Salsa20!";
+  tv.length = (int)strlen(msg);
+  memcpy(tv.pt, msg, tv.length);
+
+  uint8_t key256[32] = {0};
+  store_u64_le(key64, key256, 8);  // low 8 bytes from key64, high 24 bytes remain 0
+  Salsa20::process(tv.pt, tv.ct, tv.length, key256, tv.nonce);
+  return tv;
+}
+
 // ============================================================
 // Self-Tests
 // ============================================================
@@ -641,6 +693,43 @@ static bool self_test_aes() {
   return pass;
 }
 
+static bool self_test_salsa20() {
+  auto tv = salsa20_ecrypt_tv();
+
+  // Part 1: KAT — verify first 16 bytes of keystream via block_words4
+  // against eSTREAM Set 1, vector 0 (verified reference)
+  uint32_t out4[4];
+  Salsa20::block_words4(tv.key, 0ULL, tv.nonce, out4);
+  uint8_t out16[16];
+  for (int i = 0; i < 4; i++) {
+    out16[4*i+0] = (uint8_t)(out4[i]        & 0xFF);
+    out16[4*i+1] = (uint8_t)((out4[i] >>  8) & 0xFF);
+    out16[4*i+2] = (uint8_t)((out4[i] >> 16) & 0xFF);
+    out16[4*i+3] = (uint8_t)((out4[i] >> 24) & 0xFF);
+  }
+  bool pass_kat = (memcmp(out16, tv.stream, 16) == 0);
+
+  // Part 2: Round-trip — encrypt then XOR back (Salsa20 is its own inverse)
+  const char* msg = "Salsa20RoundTrip"; // exactly 16 bytes
+  uint8_t ct[16], rt[16];
+  Salsa20::process((const uint8_t*)msg, ct, 16, tv.key, tv.nonce);
+  Salsa20::process(ct, rt, 16, tv.key, tv.nonce);
+  bool pass_rt = (memcmp(rt, msg, 16) == 0);
+
+  bool pass = pass_kat && pass_rt;
+  std::cout << "Salsa20 Self-Test: " << (pass ? "PASS" : "FAIL") << "\n";
+  if (!pass_kat) {
+    std::cout << "  KAT Expected: " << bytes_to_hex(tv.stream, 16) << "\n";
+    std::cout << "  KAT Got:      " << bytes_to_hex(out16, 16) << "\n";
+  }
+  if (!pass_rt) {
+    std::cout << "  Round-trip FAIL: decrypted != original plaintext\n";
+    std::cout << "  Expected: " << bytes_to_hex((const uint8_t*)msg, 16) << "\n";
+    std::cout << "  Got:      " << bytes_to_hex(rt, 16) << "\n";
+  }
+  return pass;
+}
+
 static bool run_all_self_tests() {
   bool ok = true;
   ok &= self_test_simon();
@@ -654,6 +743,7 @@ static bool run_all_self_tests() {
   ok &= self_test_zuc();
   ok &= self_test_snow_v();
   ok &= self_test_aes();
+  ok &= self_test_salsa20();
   return ok;
 }
 
@@ -707,7 +797,7 @@ static Args parse_args(int argc, char** argv) {
     else if (s == "--help" || s == "-h") {
       std::cout
         << "Usage: bench [options]\n"
-        << "  --cipher <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|aes|all> (default: all)\n"
+        << "  --cipher <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|aes|salsa|all> (default: all)\n"
         << "  --variants <baseline|optimized|optimized_ilp|shared|all|auto> (default: auto)\n"
         << "  --out results.csv\n"
         << "  --min_bits 1 --max_bits 30 --step_bits 1\n"
@@ -1134,6 +1224,41 @@ static void benchmark_aes(const Args& a) {
   }
 }
 
+static void benchmark_salsa20(const Args& a) {
+  std::cout << "\n=== Salsa20 Benchmark ===\n";
+  auto tv = salsa20_bench_tv();
+
+  int max_bits = a.max_bits;
+
+  for (int b = a.min_bits; b <= max_bits; b += a.step_bits) {
+    uint64_t known_high = tv.key64 >> b;
+    uint64_t N = bf_space_size_main(b);
+
+    std::cout << "\nunknown_bits=" << b << " (keys=" << N << ")\n";
+
+    if (a.run_cpu) {
+      auto cr = brute_force_cpu_salsa20(tv.pt, tv.ct, tv.nonce, tv.length, known_high, b, a.cpu_repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "CPU:               " << cr.seconds << " s, " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "salsa20,cpu,cpu_baseline," << b << "," << cr.keys_tested << "," << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+
+    if (a.run_gpu) {
+      for (auto v : selected_gpu_variants(a, CipherType::SALSA20)) {
+        auto gr = brute_force_gpu_enhanced(CipherType::SALSA20, tv.pt, tv.ct, tv.nonce, tv.length,
+                                           known_high, b, v, a.blocks, a.threads, a.gpu_repeats);
+        double kps = safe_kps(gr.keys_tested, gr.seconds);
+        std::cout << "GPU " << gpu_variant_name(v) << ": " << gr.seconds << " s, " << kps << " keys/s, found=" << (gr.found ? "yes" : "no") << "\n";
+        std::ostringstream row;
+        row << "salsa20,gpu," << gpu_variant_name(v) << "," << b << "," << gr.keys_tested << "," << gr.seconds << "," << kps << "," << u64_hex(gr.found ? gr.found_key : 0);
+        csv_append_row(a.out_csv, row.str());
+      }
+    }
+  }
+}
+
 // ============================================================
 // main
 // ============================================================
@@ -1166,9 +1291,10 @@ int main(int argc, char** argv) {
     else if (name == "zuc") benchmark_zuc(a);
     else if (name == "snowv") benchmark_snowv(a);
     else if (name == "aes") benchmark_aes(a);
+    else if (name == "salsa") benchmark_salsa20(a);
     else {
       std::cerr << "Unknown cipher: " << name << "\n";
-      std::cerr << "Valid: simon, present, speck, grain, trivium, chacha, tinyjambu, zuc, snowv, aes, all\n";
+      std::cerr << "Valid: simon, present, speck, grain, trivium, chacha, tinyjambu, zuc, snowv, aes, salsa, all\n";
       std::exit(1);
     }
   };
@@ -1184,6 +1310,7 @@ int main(int argc, char** argv) {
     benchmark_zuc(a);
     benchmark_snowv(a);
     benchmark_aes(a);
+    benchmark_salsa20(a);
   } else {
     run_one(a.cipher);
   }

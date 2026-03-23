@@ -545,3 +545,53 @@ inline CpuBFResult brute_force_cpu_aes(const uint8_t* pt, const uint8_t* ct,
   res.seconds = time_cpu_function(search_func, repeats);
   return res;
 }
+
+// ============================================================
+// CPU brute force for Salsa20 (256-bit key, sweep low 64 bits)
+// Uses block_words4 to match only first 16 bytes of keystream
+// (counter=0, same as GPU kernels).
+// ============================================================
+
+inline CpuBFResult brute_force_cpu_salsa20(const uint8_t* pt, const uint8_t* ct,
+                                           const uint8_t* nonce8, int length,
+                                           uint64_t known_high, int unknown_bits,
+                                           int repeats) {
+  CpuBFResult res;
+  const uint64_t N = bf_space_size_cpu(unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+
+  const uint64_t base_key = (known_high << (uint64_t)unknown_bits);
+
+  uint8_t target[64] = {0};
+  cpu_bf_detail::make_target_xor(pt, ct, length, target);
+
+  auto search_func = [&]() {
+    bool found = false;
+    uint64_t found_key = 0;
+    uint64_t local_acc = 0;
+
+    for (uint64_t i = 0; i < N; i++) {
+      const uint64_t k = base_key | i;
+      uint8_t key256[32];
+      cpu_bf_detail::key64_to_key256_zero_hi192(k, key256);
+
+      uint32_t out4[4] = {0, 0, 0, 0};
+      Salsa20::block_words4(key256, 0ULL, nonce8, out4);
+      const bool match = cpu_bf_detail::chacha_match_prefix_words4_host(out4, target, length);
+      local_acc ^= ((uint64_t)out4[0] << (i & 7));
+
+      if (!found && match) {
+        found = true;
+        found_key = k;
+      }
+    }
+
+    res.found = found;
+    res.found_key = found_key;
+    cpu_bf_detail::mix_sink_u64(local_acc ^ found_key);
+  };
+
+  res.seconds = time_cpu_function(search_func, repeats);
+  return res;
+}

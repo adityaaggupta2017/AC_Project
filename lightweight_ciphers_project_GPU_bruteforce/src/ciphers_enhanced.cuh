@@ -832,6 +832,150 @@ struct ChaCha20 {
 };
 
 // ============================================================
+// Salsa20 (ARX stream cipher) - Bernstein 2005
+// Key: 256 bits, Nonce: 64 bits, Counter: 64 bits
+// Ref: https://cr.yp.to/snuffle/spec.pdf
+// ============================================================
+
+struct Salsa20 {
+  __host__ __device__ static inline uint32_t rotl32(uint32_t x, int r) {
+    return (x << r) | (x >> (32 - r));
+  }
+
+  __host__ __device__ static inline uint32_t load32_le(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+  }
+
+  __host__ __device__ static inline void store32_le(uint8_t* p, uint32_t x) {
+    p[0] = (uint8_t)(x & 0xFF);
+    p[1] = (uint8_t)((x >> 8) & 0xFF);
+    p[2] = (uint8_t)((x >> 16) & 0xFF);
+    p[3] = (uint8_t)((x >> 24) & 0xFF);
+  }
+
+  // Salsa20 quarter-round: modifies 4 elements of the 16-word state by index
+  __host__ __device__ static inline void quarter_round(uint32_t x[16], int a, int b, int c, int d) {
+    x[b] ^= rotl32(x[a] + x[d],  7);
+    x[c] ^= rotl32(x[b] + x[a],  9);
+    x[d] ^= rotl32(x[c] + x[b], 13);
+    x[a] ^= rotl32(x[d] + x[c], 18);
+  }
+
+  // Produce one 64-byte Salsa20 keystream block.
+  // State layout (256-bit key, "expand 32-byte k"):
+  //   [σ0  k0  k1  k2 ]   σ0 = 0x61707865 "expa"
+  //   [k3  σ1  n0  n1 ]   σ1 = 0x3320646e "nd 3"
+  //   [t0  t1  σ2  k4 ]   σ2 = 0x79622d32 "2-by"
+  //   [k5  k6  k7  σ3 ]   σ3 = 0x6b206574 "te k"
+  __host__ __device__ static inline void block(const uint8_t key[32], uint64_t counter,
+                                               const uint8_t nonce[8], uint8_t out[64]) {
+    uint32_t x[16];
+    x[0]  = 0x61707865u;
+    x[1]  = load32_le(key + 0);
+    x[2]  = load32_le(key + 4);
+    x[3]  = load32_le(key + 8);
+    x[4]  = load32_le(key + 12);
+    x[5]  = 0x3320646eu;
+    x[6]  = load32_le(nonce + 0);
+    x[7]  = load32_le(nonce + 4);
+    x[8]  = (uint32_t)(counter & 0xFFFFFFFFu);
+    x[9]  = (uint32_t)(counter >> 32);
+    x[10] = 0x79622d32u;
+    x[11] = load32_le(key + 16);
+    x[12] = load32_le(key + 20);
+    x[13] = load32_le(key + 24);
+    x[14] = load32_le(key + 28);
+    x[15] = 0x6b206574u;
+
+    uint32_t w[16];
+    #pragma unroll
+    for (int i = 0; i < 16; i++) w[i] = x[i];
+
+    // 20 rounds = 10 double-rounds (column-round followed by row-round)
+    #pragma unroll
+    for (int i = 0; i < 10; i++) {
+      // Column round
+      quarter_round(w,  0,  4,  8, 12);
+      quarter_round(w,  5,  9, 13,  1);
+      quarter_round(w, 10, 14,  2,  6);
+      quarter_round(w, 15,  3,  7, 11);
+      // Row round
+      quarter_round(w,  0,  1,  2,  3);
+      quarter_round(w,  5,  6,  7,  4);
+      quarter_round(w, 10, 11,  8,  9);
+      quarter_round(w, 15, 12, 13, 14);
+    }
+
+    #pragma unroll
+    for (int i = 0; i < 16; i++) {
+      store32_le(out + 4 * i, w[i] + x[i]);
+    }
+  }
+
+  // Optimized: produce only the first 4 output words (16 bytes).
+  // Used by GPU brute-force kernels to avoid materializing the full 64-byte block
+  // when matching against a short plaintext prefix.
+  __host__ __device__ static inline void block_words4(const uint8_t key[32], uint64_t counter,
+                                                      const uint8_t nonce[8], uint32_t out4[4]) {
+    uint32_t x[16];
+    x[0]  = 0x61707865u;
+    x[1]  = load32_le(key + 0);
+    x[2]  = load32_le(key + 4);
+    x[3]  = load32_le(key + 8);
+    x[4]  = load32_le(key + 12);
+    x[5]  = 0x3320646eu;
+    x[6]  = load32_le(nonce + 0);
+    x[7]  = load32_le(nonce + 4);
+    x[8]  = (uint32_t)(counter & 0xFFFFFFFFu);
+    x[9]  = (uint32_t)(counter >> 32);
+    x[10] = 0x79622d32u;
+    x[11] = load32_le(key + 16);
+    x[12] = load32_le(key + 20);
+    x[13] = load32_le(key + 24);
+    x[14] = load32_le(key + 28);
+    x[15] = 0x6b206574u;
+
+    uint32_t w[16];
+    #pragma unroll
+    for (int i = 0; i < 16; i++) w[i] = x[i];
+
+    #pragma unroll
+    for (int i = 0; i < 10; i++) {
+      quarter_round(w,  0,  4,  8, 12);
+      quarter_round(w,  5,  9, 13,  1);
+      quarter_round(w, 10, 14,  2,  6);
+      quarter_round(w, 15,  3,  7, 11);
+      quarter_round(w,  0,  1,  2,  3);
+      quarter_round(w,  5,  6,  7,  4);
+      quarter_round(w, 10, 11,  8,  9);
+      quarter_round(w, 15, 12, 13, 14);
+    }
+
+    out4[0] = w[0] + x[0];
+    out4[1] = w[1] + x[1];
+    out4[2] = w[2] + x[2];
+    out4[3] = w[3] + x[3];
+  }
+
+  // XOR keystream with input (counter starts at 0, increments per 64-byte block)
+  __host__ __device__ static inline void process(const uint8_t* input, uint8_t* output, int length,
+                                                 const uint8_t key[32], const uint8_t nonce[8]) {
+    uint64_t block_count = 0;
+    int offset = 0;
+    while (offset < length) {
+      uint8_t ks[64];
+      block(key, block_count, nonce, ks);
+      int n = (length - offset > 64) ? 64 : (length - offset);
+      for (int i = 0; i < n; i++) {
+        output[offset + i] = input[offset + i] ^ ks[i];
+      }
+      offset += n;
+      block_count++;
+    }
+  }
+};
+
+// ============================================================
 // TinyJAMBU-128 (v2)
 // Key: 128 bits, Nonce: 96 bits, Tag: 64 bits, State: 128 bits
 // Ref: https://csrc.nist.gov/CSRC/media/Projects/lightweight-cryptography/documents/finalist-round/updated-spec-doc/tinyjambu-spec-final.pdf

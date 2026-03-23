@@ -430,6 +430,99 @@ __global__ void bf_kernel_chacha20(const uint8_t* pt, const uint8_t* ct, int len
 }
 
 // ============================================================
+// Salsa20 GPU Kernels (ARX stream cipher)
+// (We brute-force a 64-bit portion of the 256-bit key: low64 varies, rest=0.)
+// ============================================================
+
+__device__ inline void try_key_salsa20(const uint8_t* pt, const uint8_t* ct, int length,
+                                       const uint8_t nonce[8], uint64_t key64,
+                                       uint64_t* found_key, int* found_flag) {
+  uint8_t key256[32];
+  #pragma unroll
+  for (int j = 0; j < 8; j++) key256[j] = (uint8_t)((key64 >> (j * 8)) & 0xFF);
+  #pragma unroll
+  for (int j = 8; j < 32; j++) key256[j] = 0;
+
+  uint8_t out[64];
+  Salsa20::process(pt, out, length, key256, nonce);
+
+  bool match = true;
+  for (int j = 0; j < length; j++) {
+    if (out[j] != ct[j]) { match = false; break; }
+  }
+
+  if (match) {
+    if (atomicCAS(found_flag, 0, 1) == 0) {
+      *found_key = key64;
+    }
+  }
+}
+
+__global__ void bf_kernel_salsa20(const uint8_t* pt, const uint8_t* ct, int length,
+                                  const uint8_t* nonce8, uint64_t base_key, uint64_t N,
+                                  uint64_t* found_key, int* found_flag) {
+  uint64_t tid = (uint64_t)blockIdx.x * (uint64_t)blockDim.x + (uint64_t)threadIdx.x;
+  uint64_t stride = (uint64_t)gridDim.x * (uint64_t)blockDim.x;
+
+  uint8_t nonce_local[8];
+  #pragma unroll
+  for (int j = 0; j < 8; j++) nonce_local[j] = nonce8[j];
+
+  for (uint64_t i = tid; i < N; i += stride) {
+    uint64_t k = base_key | i;
+    try_key_salsa20(pt, ct, length, nonce_local, k, found_key, found_flag);
+  }
+}
+
+__device__ __forceinline__ bool salsa_match_prefix_words4(const uint32_t out4[4],
+                                                          const uint8_t* target, int len) {
+  int n = (len > 16) ? 16 : len;
+  #pragma unroll
+  for (int i = 0; i < 16; i++) {
+    if (i >= n) break;
+    uint8_t b = (uint8_t)((out4[i >> 2] >> (8 * (i & 3))) & 0xFF);
+    if (b != target[i]) return false;
+  }
+  return true;
+}
+
+// gpu1_optimized: early-exit by matching keystream prefix (block_words4, counter=0)
+// gpu2_optimized+ilp: ILP2 (2 keys per loop) + early-exit
+template<bool ILP2, bool STOP_ON_FOUND>
+__global__ void bf_kernel_salsa20_match(const uint8_t* target, int data_len, const uint8_t* nonce8,
+                                        uint64_t known_high, int unknown_bits, uint64_t N,
+                                        volatile int* d_found, uint64_t* d_found_key) {
+  uint64_t tid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  uint64_t stride = (uint64_t)gridDim.x * blockDim.x;
+
+  auto test_one = [=] __device__ (uint64_t low) {
+    if (STOP_ON_FOUND && *d_found) return;
+    uint64_t key64 = (known_high << unknown_bits) | low;
+
+    uint8_t key256[32] = {0};
+    #pragma unroll
+    for (int i = 0; i < 8; i++) key256[i] = (uint8_t)((key64 >> (8*i)) & 0xFF);
+
+    uint32_t out4[4];
+    Salsa20::block_words4(key256, 0ULL, nonce8, out4);
+
+    if (salsa_match_prefix_words4(out4, target, data_len)) {
+      if (atomicCAS((int*)d_found, 0, 1) == 0) *d_found_key = key64;
+    }
+  };
+
+  if constexpr (ILP2) {
+    for (uint64_t k = tid; k < N && (!STOP_ON_FOUND || !(*d_found)); k += stride * 2ULL) {
+      test_one(k);
+      uint64_t k2 = k + stride;
+      if (k2 < N) test_one(k2);
+    }
+  } else {
+    for (uint64_t k = tid; k < N && (!STOP_ON_FOUND || !(*d_found)); k += stride) test_one(k);
+  }
+}
+
+// ============================================================
 // Unified GPU Brute Force Interface
 // ============================================================
 
@@ -443,7 +536,8 @@ enum class CipherType {
   TINYJAMBU_128,
   SNOW_V,
   ZUC_128,
-  AES_128
+  AES_128,
+  SALSA20
 };
 
 // ============================================================
@@ -950,7 +1044,8 @@ inline GpuBFResult brute_force_gpu_enhanced(CipherType cipher,
                           cipher == CipherType::TRIVIUM ||
                           cipher == CipherType::CHACHA20 ||
                           cipher == CipherType::ZUC_128 ||
-                          cipher == CipherType::SNOW_V);
+                          cipher == CipherType::SNOW_V ||
+                          cipher == CipherType::SALSA20);
 
   const bool use_target = is_stream && (variant != GpuVariant::BASELINE);
 
@@ -962,6 +1057,7 @@ inline GpuBFResult brute_force_gpu_enhanced(CipherType cipher,
     else if (cipher == CipherType::CHACHA20) iv_len = 12;
     else if (cipher == CipherType::ZUC_128) iv_len = 16;
     else if (cipher == CipherType::SNOW_V) iv_len = 16;
+    else if (cipher == CipherType::SALSA20) iv_len = 8;
 
     cuda_check(cudaMalloc(&d_iv, (size_t)iv_len), "cudaMalloc iv/nonce");
     cuda_check(cudaMemcpy(d_iv, iv_or_nonce, (size_t)iv_len, cudaMemcpyHostToDevice), "memcpy iv/nonce");
@@ -1137,6 +1233,22 @@ inline GpuBFResult brute_force_gpu_enhanced(CipherType cipher,
         }
         break;
 
+      case CipherType::SALSA20:
+        if (variant == GpuVariant::BASELINE) {
+          bf_kernel_salsa20<<<blocks, threads, 0, stream>>>(
+            d_pt, d_ct, data_len, d_iv, base_key, N, d_found_key, d_found_flag
+          );
+        } else if (variant == GpuVariant::OPTIMIZED) {
+          bf_kernel_salsa20_match<false, false><<<blocks, threads, 0, stream>>>(
+            d_target, data_len, d_iv, known_high, unknown_bits, N, d_found_flag, d_found_key
+          );
+        } else {
+          bf_kernel_salsa20_match<true, false><<<blocks, threads, 0, stream>>>(
+            d_target, data_len, d_iv, known_high, unknown_bits, N, d_found_flag, d_found_key
+          );
+        }
+        break;
+
       case CipherType::TINYJAMBU_128:
         // AEAD cipher: use brute_force_gpu_enhanced_aead() instead
         break;
@@ -1280,6 +1392,22 @@ inline GpuBFResult brute_force_gpu_enhanced(CipherType cipher,
           // gpu1_optimized: mixcolumns_fast, no ILP
           bf_kernel_aes_opt<false, true><<<blocks, threads, 0, stream>>>(
             d_pt, d_ct, base_key, N, d_found_key, d_found_flag
+          );
+        }
+        break;
+
+      case CipherType::SALSA20:
+        if (variant == GpuVariant::BASELINE) {
+          bf_kernel_salsa20<<<blocks, threads, 0, stream>>>(
+            d_pt, d_ct, data_len, d_iv, base_key, N, d_found_key, d_found_flag
+          );
+        } else if (variant == GpuVariant::OPTIMIZED) {
+          bf_kernel_salsa20_match<false, true><<<blocks, threads, 0, stream>>>(
+            d_target, data_len, d_iv, known_high, unknown_bits, N, d_found_flag, d_found_key
+          );
+        } else {
+          bf_kernel_salsa20_match<true, true><<<blocks, threads, 0, stream>>>(
+            d_target, data_len, d_iv, known_high, unknown_bits, N, d_found_flag, d_found_key
           );
         }
         break;

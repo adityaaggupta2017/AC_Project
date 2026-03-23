@@ -1,6 +1,6 @@
 # Lightweight Ciphers — GPU Brute-Force Benchmark
 
-Partial-key brute-force throughput benchmarks (CPU and CUDA GPU) for ten lightweight and
+Partial-key brute-force throughput benchmarks (CPU and CUDA GPU) for eleven lightweight and
 modern stream/block ciphers. The project measures how many candidate keys per second each
 implementation can test, sweeping over a configurable range of unknown key bits.
 
@@ -20,6 +20,7 @@ implementation can test, sweeping over a configurable range of unknown key bits.
 | 8 | **ZUC-128** | Stream | Low 64 of 128-bit key | 128-bit IV; 3GPP/GSMA (EEA3/EIA3) |
 | 9 | **SNOW-V** | Stream | Low 64 of 256-bit key | 128-bit IV; AES-based FSM |
 | 10 | **AES-128** | Block | Low 64 of 128-bit key | NIST FIPS 197; verified against NIST test vector |
+| 11 | **Salsa20** | Stream (ARX) | Low 64 of 256-bit key | 64-bit nonce; eSTREAM portfolio; verified against eSTREAM Set 1 vector |
 
 > **Brute-force model:** only the lowest 64 bits of each key are swept; the remaining bits
 > are held fixed at zero. `unknown_bits=N` means the lowest N bits are unknown — the search
@@ -41,6 +42,7 @@ Default `auto` mode selects the most relevant variants per cipher:
 - **PRESENT-80** — baseline, optimized, optimized_ilp, **shared**
 - **TinyJAMBU-128** — baseline, optimized_ilp, **bitsliced**
 - **AES-128** — baseline, optimized, optimized_ilp
+- **Salsa20** — baseline, optimized, optimized_ilp
 - **All others** — baseline, optimized, optimized_ilp
 
 ---
@@ -112,6 +114,61 @@ increases arithmetic throughput utilization.
 
 ---
 
+## Salsa20 GPU Variant Details
+
+Salsa20 is a 20-round ARX stream cipher with a 256-bit key, 64-bit nonce, and 64-bit counter. Each block produces 64 bytes of keystream. The three GPU variants differ in how many bytes are computed per key candidate and how many candidates are processed per thread per loop iteration.
+
+### State Layout
+
+Salsa20 uses a 4×4 matrix of 32-bit words (all little-endian):
+
+```
+σ0   k0   k1   k2      σ0 = 0x61707865  "expa"
+k3   σ1   n0   n1      σ1 = 0x3320646e  "nd 3"
+t0   t1   σ2   k4      σ2 = 0x79622d32  "2-by"
+k5   k6   k7   σ3      σ3 = 0x6b206574  "te k"
+```
+
+where k0..k7 = 256-bit key words, n0/n1 = 64-bit nonce words, t0/t1 = 64-bit counter words.
+
+### Quarter-Round Function
+
+Each column-round and row-round applies this QR(a, b, c, d) to 4 state words:
+
+```
+x[b] ^= (x[a] + x[d]) <<< 7
+x[c] ^= (x[b] + x[a]) <<< 9
+x[d] ^= (x[c] + x[b]) <<< 13
+x[a] ^= (x[d] + x[c]) <<< 18
+```
+
+Note the different rotation amounts (7, 9, 13, 18) compared to ChaCha20 (16, 12, 8, 7), and the different order of adds.
+
+### gpu0_baseline — Full 64-byte block
+
+Each thread calls `Salsa20::process()` which produces the full 64-byte keystream block, then compares against the ciphertext. No early exit.
+
+### gpu1_optimized — First-16-byte prefix match with early exit
+
+Uses `Salsa20::block_words4()` which computes only the **first 4 output words (16 bytes)** by running the full 20-round core but extracting only `w[0..3] + x[0..3]`. This avoids materializing bytes 16–63. The match check aborts immediately on the first mismatched byte (`STOP_ON_FOUND` propagation in the optimized variant).
+
+The savings: ~4× fewer memory writes per candidate; no loop over full 64 bytes on mismatch.
+
+### gpu2_optimized+ilp — First-16-byte prefix match + ILP2
+
+Same `block_words4` optimization as `gpu1_optimized`, plus **Instruction Level Parallelism (ILP2)**:
+each thread processes **2 candidate keys per loop iteration**. Since each `test_one` call is fully independent (separate key, no shared state), the GPU's execution units overlap memory latency across the two ARX pipelines.
+
+### Summary Table
+
+| Variant | Bytes computed | Keys/thread/iter | Throughput |
+|---------|----------------|-----------------|------------|
+| `gpu0_baseline` | 64 (full block) | 1 | Lowest |
+| `gpu1_optimized` | 16 (prefix only) | 1 | ~2–3x baseline |
+| `gpu2_optimized+ilp` | 16 (prefix only) | 2 | Highest |
+
+---
+
 ## Repository Layout
 
 ```
@@ -121,7 +178,7 @@ lightweight_ciphers_project_GPU_bruteforce/
 ├── plot_results.py
 ├── src/
 │   ├── main.cu                    # Benchmark driver, self-tests, CLI
-│   ├── ciphers_enhanced.cuh       # All ten cipher implementations (host + device)
+│   ├── ciphers_enhanced.cuh       # All eleven cipher implementations (host + device)
 │   ├── bruteforce_gpu_enhanced.cuh # GPU kernels, CipherType/GpuVariant enums, launch helpers
 │   ├── bruteforce_cpu.hpp         # CPU brute-force reference implementations
 │   ├── present_spbox_tables.inc   # Pre-generated PRESENT-80 SP-box lookup tables
@@ -190,6 +247,7 @@ TinyJAMBU-128 Bitsliced Self-Test: PASS
 ZUC-128 Self-Test:                 PASS
 SNOW-V Self-Test:                  PASS
 AES-128 Self-Test:                 PASS
+Salsa20 Self-Test:                 PASS
 ```
 
 ---
@@ -198,7 +256,7 @@ AES-128 Self-Test:                 PASS
 
 All commands below assume you are inside the `build/` directory.
 
-### Run all 10 ciphers (recommended full benchmark)
+### Run all 11 ciphers (recommended full benchmark)
 
 ```bash
 ./bench --cipher all \
@@ -309,6 +367,24 @@ Run only specific AES GPU variants:
 ./bench --cipher aes --variants optimized_ilp --min_bits 1 --max_bits 30 --out ../results_aes_ilp.csv
 ```
 
+#### 11. Salsa20
+
+```bash
+./bench --cipher salsa --min_bits 1 --max_bits 30 --step_bits 1 --out ../results_salsa20.csv
+```
+
+Run only specific Salsa20 GPU variants:
+```bash
+# Baseline only (full 64-byte block per candidate)
+./bench --cipher salsa --variants baseline --min_bits 1 --max_bits 30 --out ../results_salsa20_baseline.csv
+
+# Optimized only (first 16-byte prefix match, early exit)
+./bench --cipher salsa --variants optimized --min_bits 1 --max_bits 30 --out ../results_salsa20_opt.csv
+
+# ILP2 only (2 keys per loop + early exit)
+./bench --cipher salsa --variants optimized_ilp --min_bits 1 --max_bits 30 --out ../results_salsa20_ilp.csv
+```
+
 ---
 
 ## Selecting GPU Variants Manually
@@ -339,7 +415,7 @@ Run only specific AES GPU variants:
 
 ```
 Usage: bench [options]
-  --cipher   <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|aes|all>
+  --cipher   <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|aes|salsa|all>
              (default: all)
   --variants <baseline|optimized|optimized_ilp|shared|bitsliced|all|auto>
              (default: auto — best variants per cipher)
@@ -375,6 +451,9 @@ aes_128,cpu,cpu_baseline,10,1024,0.000015,68266666,0x0000000000000000
 aes_128,gpu,gpu0_baseline,10,1024,0.0000058,176551724,0x0000000000000000
 aes_128,gpu,gpu1_optimized,10,1024,0.0000021,487619047,0x0000000000000000
 aes_128,gpu,gpu2_optimized+ilp,10,1024,0.0000014,731428571,0x0000000000000000
+salsa20,gpu,gpu0_baseline,10,1024,0.0000049,208979591,0x0000000000000000
+salsa20,gpu,gpu1_optimized,10,1024,0.0000018,568888888,0x0000000000000000
+salsa20,gpu,gpu2_optimized+ilp,10,1024,0.0000012,853333333,0x0000000000000000
 tinyjambu_128,gpu,gpu4_bitsliced,10,1024,0.0000045,227555555,0xa55a12343fffffff
 ```
 
@@ -413,4 +492,5 @@ Plots are saved as PNG files in the `--outdir` directory:
 | PRESENT-80 shared-memory study | `--cipher present --variants all` |
 | TinyJAMBU bitsliced study | `--cipher tinyjambu --variants all --max_bits 16` |
 | AES MixColumns optimization study | `--cipher aes --variants all` |
-| Stream cipher comparison | `--cipher grain` then `--cipher trivium` then `--cipher chacha` |
+| Salsa20 vs ChaCha20 comparison | `--cipher salsa` then `--cipher chacha` |
+| Stream cipher comparison | `--cipher grain` then `--cipher trivium` then `--cipher chacha` then `--cipher salsa` |
