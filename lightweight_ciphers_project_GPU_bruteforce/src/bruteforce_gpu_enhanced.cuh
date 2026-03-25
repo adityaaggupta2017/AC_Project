@@ -537,7 +537,8 @@ enum class CipherType {
   SNOW_V,
   ZUC_128,
   AES_128,
-  SALSA20
+  SALSA20,
+  GRAIN128_AEADV2
 };
 
 // ============================================================
@@ -1005,6 +1006,107 @@ __global__ void bf_kernel_aes_opt(const uint8_t* pt, const uint8_t* ct, uint64_t
   } else {
     for (uint64_t k = tid; k < N; k += stride) {
       try_key_aes_opt<UseTTable>(pt, ct, base_key | k, found_key, found_flag);
+    }
+  }
+}
+
+// ============================================================
+// Grain-128AEADv2 GPU Kernels
+// ============================================================
+
+__device__ inline void try_key_grain128aeadv2(const uint8_t* pt, const uint8_t* ct, int length,
+                                             const uint8_t* expected_tag, const uint8_t nonce[12],
+                                             const uint8_t* ad, int ad_len, uint64_t key64,
+                                             uint64_t* found_key, int* found_flag) {
+  uint8_t key[16] = {0};
+  #pragma unroll
+  for (int j = 0; j < 8; j++) key[j] = (uint8_t)((key64 >> (j * 8)) & 0xFF);
+
+  uint8_t out_ct[64];
+  uint8_t out_tag[8];
+  Grain128AEADv2::process(pt, out_ct, length, ad, ad_len, out_tag, key, nonce);
+
+  bool match = true;
+  for (int j = 0; j < length; j++) {
+    if (out_ct[j] != ct[j]) { match = false; break; }
+  }
+  if (match) {
+    for (int j = 0; j < 8; j++) {
+      if (out_tag[j] != expected_tag[j]) { match = false; break; }
+    }
+  }
+  if (match && atomicCAS(found_flag, 0, 1) == 0) *found_key = key64;
+}
+
+template<bool ILP2, bool STOP_ON_FOUND>
+__global__ void bf_kernel_grain128aeadv2(const uint8_t* pt, const uint8_t* ct, int length,
+                                         const uint8_t* expected_tag, const uint8_t* nonce,
+                                         const uint8_t* ad, int ad_len, uint64_t base_key, uint64_t N,
+                                         uint64_t* found_key, int* found_flag) {
+  uint64_t tid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  uint64_t stride = (uint64_t)gridDim.x * blockDim.x;
+
+  uint8_t nonce_local[12];
+  #pragma unroll
+  for (int j = 0; j < 12; j++) nonce_local[j] = nonce[j];
+
+  auto test_one = [=] __device__ (uint64_t low) {
+    if (STOP_ON_FOUND && *found_flag) return;
+    try_key_grain128aeadv2(pt, ct, length, expected_tag, nonce_local, ad, ad_len, base_key | low, found_key, found_flag);
+  };
+
+  if constexpr (ILP2) {
+    for (uint64_t k = tid; k < N && (!STOP_ON_FOUND || !(*found_flag)); k += stride * 2ULL) {
+      test_one(k);
+      if (k + stride < N) test_one(k + stride);
+    }
+  } else {
+    for (uint64_t i = tid; i < N && (!STOP_ON_FOUND || !(*found_flag)); i += stride) test_one(i);
+  }
+}
+
+__global__ void bf_kernel_grain128aeadv2_bitsliced(const uint8_t* pt, const uint8_t* ct, int length,
+                                                   const uint8_t* nonce, const uint8_t* ad, int ad_len,
+                                                   uint64_t base_key, uint64_t N,
+                                                   uint64_t* found_key, int* found_flag) {
+  uint64_t tid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  uint64_t stride = (uint64_t)gridDim.x * blockDim.x;
+
+  uint64_t global_key_idx = tid * 32ULL;
+  uint64_t step = stride * 32ULL;
+
+  uint8_t nonce_local[12];
+  #pragma unroll
+  for (int j = 0; j < 12; j++) nonce_local[j] = nonce[j];
+
+  uint32_t nonce_bitsliced[96] = {0};
+  #pragma unroll
+  for (int i = 0; i < 96; i++) {
+    uint32_t bit_val = (nonce_local[i / 8] >> (i % 8)) & 1;
+    nonce_bitsliced[i] = bit_val ? 0xFFFFFFFF : 0x00000000;
+  }
+
+  for (uint64_t i = global_key_idx; i < N && !(*found_flag); i += step) {
+    uint32_t key_bitsliced[128] = {0};
+    #pragma unroll
+    for (int k = 0; k < 32; k++) {
+      uint64_t current_key = (i + k < N) ? (base_key | (i + k)) : base_key;
+      #pragma unroll
+      for (int b = 0; b < 64; b++) {
+        uint32_t bit_val = (current_key >> b) & 1;
+        key_bitsliced[b] |= (bit_val << k);
+      }
+    }
+    uint32_t match_mask = Grain128AEADv2_Bitsliced::match_keys(
+      key_bitsliced, nonce_bitsliced, ad_len, pt, ct, length
+    );
+    if (match_mask != 0) {
+      for (int k = 0; k < 32; k++) {
+        if ((match_mask >> k) & 1) {
+          if (i + k < N && atomicCAS(found_flag, 0, 1) == 0)
+            *found_key = base_key | (i + k);
+        }
+      }
     }
   }
 }
@@ -1515,6 +1617,20 @@ inline GpuBFResult brute_force_gpu_enhanced_aead(CipherType cipher,
           d_pt, d_ct, pt_len, d_tag, d_nonce, d_ad, ad_len, base_key, N, d_found_key, d_found_flag
         );
       }
+    } else if (cipher == CipherType::GRAIN128_AEADV2) {
+      if (variant == GpuVariant::BITSLICED) {
+        bf_kernel_grain128aeadv2_bitsliced<<<blocks, threads, 0, stream>>>(
+          d_pt, d_ct, pt_len, d_nonce, d_ad, ad_len, base_key, N, d_found_key, d_found_flag
+        );
+      } else if (use_ilp) {
+        bf_kernel_grain128aeadv2<true, false><<<blocks, threads, 0, stream>>>(
+          d_pt, d_ct, pt_len, d_tag, d_nonce, d_ad, ad_len, base_key, N, d_found_key, d_found_flag
+        );
+      } else {
+        bf_kernel_grain128aeadv2<false, false><<<blocks, threads, 0, stream>>>(
+          d_pt, d_ct, pt_len, d_tag, d_nonce, d_ad, ad_len, base_key, N, d_found_key, d_found_flag
+        );
+      }
     }
     cuda_check(cudaGetLastError(), "AEAD kernel launch timed");
   };
@@ -1532,6 +1648,20 @@ inline GpuBFResult brute_force_gpu_enhanced_aead(CipherType cipher,
         );
       } else {
         bf_kernel_tinyjambu<false, true><<<blocks, threads, 0, stream>>>(
+          d_pt, d_ct, pt_len, d_tag, d_nonce, d_ad, ad_len, base_key, N, d_found_key, d_found_flag
+        );
+      }
+    } else if (cipher == CipherType::GRAIN128_AEADV2) {
+      if (variant == GpuVariant::BITSLICED) {
+        bf_kernel_grain128aeadv2_bitsliced<<<blocks, threads, 0, stream>>>(
+          d_pt, d_ct, pt_len, d_nonce, d_ad, ad_len, base_key, N, d_found_key, d_found_flag
+        );
+      } else if (use_ilp) {
+        bf_kernel_grain128aeadv2<true, true><<<blocks, threads, 0, stream>>>(
+          d_pt, d_ct, pt_len, d_tag, d_nonce, d_ad, ad_len, base_key, N, d_found_key, d_found_flag
+        );
+      } else {
+        bf_kernel_grain128aeadv2<false, true><<<blocks, threads, 0, stream>>>(
           d_pt, d_ct, pt_len, d_tag, d_nonce, d_ad, ad_len, base_key, N, d_found_key, d_found_flag
         );
       }

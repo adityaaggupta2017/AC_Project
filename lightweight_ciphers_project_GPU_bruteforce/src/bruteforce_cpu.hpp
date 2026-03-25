@@ -595,3 +595,54 @@ inline CpuBFResult brute_force_cpu_salsa20(const uint8_t* pt, const uint8_t* ct,
   res.seconds = time_cpu_function(search_func, repeats);
   return res;
 }
+
+
+// ============================================================
+// CPU brute force for Grain-128AEADv2
+// Key: 128 bits (sweeps low 64 bits), Nonce: 96 bits
+// Uses early-reject match_keystream to abort on first bad byte.
+// ============================================================
+inline CpuBFResult brute_force_cpu_grain128aeadv2(const uint8_t* pt, const uint8_t* ct,
+                                                 const uint8_t* nonce, int length,
+                                                 const uint8_t* ad, int ad_len,
+                                                 uint64_t known_high, int unknown_bits,
+                                                 int repeats) {
+  CpuBFResult res;
+  const uint64_t N = bf_space_size_cpu(unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+
+  const uint64_t base_key = (known_high << (uint64_t)unknown_bits);
+
+  uint8_t target[128] = {0};
+  cpu_bf_detail::make_target_xor(pt, ct, length, target);
+
+  auto search_func = [&]() {
+    bool found = false;
+    uint64_t found_key = 0;
+    uint64_t local_acc = 0;
+
+    for (uint64_t i = 0; i < N; i++) {
+      const uint64_t k = base_key | i;
+
+      uint8_t key[16] = {0};
+      for (int j = 0; j < 8; j++) key[j] = (uint8_t)((k >> (8 * j)) & 0xFF);
+
+      const bool match = Grain128AEADv2::match_keystream(key, nonce, ad, ad_len, target, length);
+
+      local_acc ^= ((uint64_t)(match ? 0x9b : 0x41) << (i & 7));
+
+      if (!found && match) {
+        found = true;
+        found_key = k;
+      }
+    }
+
+    res.found = found;
+    res.found_key = found_key;
+    cpu_bf_detail::mix_sink_u64(local_acc ^ found_key);
+  };
+
+  res.seconds = time_cpu_function(search_func, repeats);
+  return res;
+}

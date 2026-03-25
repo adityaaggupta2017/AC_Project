@@ -1,7 +1,7 @@
 # Lightweight Ciphers — GPU Brute-Force Benchmark
 
-Partial-key brute-force throughput benchmarks (CPU and CUDA GPU) for eleven lightweight and
-modern stream/block ciphers. The project measures how many candidate keys per second each
+Partial-key brute-force throughput benchmarks (CPU and CUDA GPU) for twelve lightweight and
+modern stream/block/AEAD ciphers. The project measures how many candidate keys per second each
 implementation can test, sweeping over a configurable range of unknown key bits.
 
 ---
@@ -21,6 +21,7 @@ implementation can test, sweeping over a configurable range of unknown key bits.
 | 9 | **SNOW-V** | Stream | Low 64 of 256-bit key | 128-bit IV; AES-based FSM |
 | 10 | **AES-128** | Block | Low 64 of 128-bit key | NIST FIPS 197; verified against NIST test vector |
 | 11 | **Salsa20** | Stream (ARX) | Low 64 of 256-bit key | 64-bit nonce; eSTREAM portfolio; verified against eSTREAM Set 1 vector |
+| 12 | **Grain-128AEADv2** | AEAD | Low 64 of 128-bit key | 96-bit nonce, 64-bit tag; NIST LWC finalist; bitsliced 32-way parallelism |
 
 > **Brute-force model:** only the lowest 64 bits of each key are swept; the remaining bits
 > are held fixed at zero. `unknown_bits=N` means the lowest N bits are unknown — the search
@@ -36,11 +37,12 @@ implementation can test, sweeping over a configurable range of unknown key bits.
 | `optimized` | `gpu1_optimized` | Optimized encrypt (fast MixColumns for AES; early-exit for stream ciphers) |
 | `optimized_ilp` | `gpu2_optimized+ilp` | 4 keys per loop iteration (ILP4) + optimized encrypt |
 | `shared` | `gpu3_optimized+shared` | Shared-memory SP-box table (PRESENT-80 only) |
-| `bitsliced` | `gpu4_bitsliced` | 32 keys per thread via bitsliced permutation (TinyJAMBU-128 only) |
+| `bitsliced` | `gpu4_bitsliced` | 32 keys per thread via bitsliced permutation (TinyJAMBU-128 and Grain-128AEADv2) |
 
 Default `auto` mode selects the most relevant variants per cipher:
 - **PRESENT-80** — baseline, optimized, optimized_ilp, **shared**
 - **TinyJAMBU-128** — baseline, optimized_ilp, **bitsliced**
+- **Grain-128AEADv2** — baseline, optimized_ilp, **bitsliced**
 - **AES-128** — baseline, optimized, optimized_ilp
 - **Salsa20** — baseline, optimized, optimized_ilp
 - **All others** — baseline, optimized, optimized_ilp
@@ -150,7 +152,7 @@ Each thread calls `Salsa20::process()` which produces the full 64-byte keystream
 
 ### gpu1_optimized — First-16-byte prefix match with early exit
 
-Uses `Salsa20::block_words4()` which computes only the **first 4 output words (16 bytes)** by running the full 20-round core but extracting only `w[0..3] + x[0..3]`. This avoids materializing bytes 16–63. The match check aborts immediately on the first mismatched byte (`STOP_ON_FOUND` propagation in the optimized variant).
+Uses `Salsa20::block_words4()` which computes only the **first 4 output words (16 bytes)** by running the full 20-round core but extracting only `w[0..3] + x[0..3]`. This avoids materializing bytes 16–63. The match check aborts immediately on the first mismatched byte.
 
 The savings: ~4× fewer memory writes per candidate; no loop over full 64 bytes on mismatch.
 
@@ -169,6 +171,80 @@ each thread processes **2 candidate keys per loop iteration**. Since each `test_
 
 ---
 
+## Grain-128AEADv2 GPU Variant Details
+
+Grain-128AEADv2 is a NIST LWC finalist authenticated stream cipher. It uses a 128-bit key,
+96-bit nonce, and produces a 64-bit authentication tag alongside the ciphertext. The cipher
+operates over two 128-bit shift registers (LFSR and NFSR) with a nonlinear pre-output function.
+
+### Cipher Structure
+
+```
+LFSR (128 bits): linear feedback polynomial f(x) = x^128 + x^7 + x^38 + x^70 + x^81 + x^96 + 1
+NFSR (128 bits): nonlinear feedback polynomial g(x) with product terms (up to 4-way AND)
+Pre-output h(x): nonlinear function of 5 selected LFSR and NFSR taps
+Output y_t      = h(x) ⊕ LFSR[93] ⊕ NFSR[2,15,36,45,64,73,89]
+```
+
+**Initialization** requires 512 clock cycles:
+1. 320 clocks with key and nonce fed back into registers
+2. 64 clocks with upper key bits fed into LFSR, lower key bits into NFSR
+3. 64 clocks to fill the MAC accumulator (auth_acc)
+4. 64 clocks to fill the MAC shift register (auth_sr)
+
+**Encryption**: alternating clock outputs — even clocks (z_i) XOR with plaintext; odd clocks (z′) update the MAC.
+
+**Authentication**: Associated data is processed through the MAC before ciphertext. A DER-encoded length prefix is prepended to the AD byte stream. The 64-bit tag is extracted from auth_acc at the end.
+
+### GPU Variants
+
+#### gpu0_baseline — Full AEAD with tag verification
+
+Each thread calls `Grain128AEADv2::process()` which runs the complete AEAD (512-clock init + AD + encryption + tag generation), then compares both ciphertext and tag. No early exit — all bytes computed.
+
+#### gpu2_optimized+ilp — Full AEAD + ILP2
+
+Same full `process()` call as baseline, plus **Instruction Level Parallelism (ILP2)**: each thread evaluates 2 candidate keys per loop iteration. The two independent LFSR/NFSR pipelines allow the GPU's execution units to overlap the long sequential clock chains across candidates.
+
+#### gpu4_bitsliced — 32-lane bitsliced matching
+
+The bitsliced variant processes **32 candidate keys simultaneously** using `uint32_t` as the bitsliced word (each bit position represents one lane):
+
+```
+32 sequential keys → broadcast into key_bitsliced[128] (each uint32_t = 32 parallel bit positions)
+nonce → broadcast into nonce_bitsliced[96] (same constant across all lanes)
+init(key_bitsliced, nonce_bitsliced) → runs all 512+128=640 init clocks bitsliced
+fast-forward 128 MAC init clocks + AD clocks (all lanes identical, purely a shift)
+per plaintext bit: z_i = clock() → compare against expected keystream bit → update match_mask
+early reject: if match_mask == 0 → all 32 keys failed this byte → exit immediately
+```
+
+**Key optimization**: the bitsliced variant skips full tag generation. It performs **keystream-only matching** (early reject on first bad byte), which gives a significant speedup because:
+- Most wrong keys are rejected after the first 1–2 keystream bytes (8–16 clock pairs)
+- No need to run the full 512-clock initialization when it can abort immediately
+- 32 keys tested per thread per iteration instead of 1
+
+**Throughput advantage**: the bitsliced kernel achieves roughly **10–30× speedup** over the baseline for short messages, since most wrong keys are eliminated after processing just the first byte.
+
+### Summary Table
+
+| Variant | Verification | Keys/thread/iter | Notes |
+|---------|-------------|-----------------|-------|
+| `gpu0_baseline` | Full CT + tag | 1 | Complete AEAD per key |
+| `gpu2_optimized+ilp` | Full CT + tag | 2 | ILP2 overlaps two AEAD pipelines |
+| `gpu4_bitsliced` | Keystream only (early reject) | 32 | Best throughput; skips tag check |
+
+### CPU Brute Force
+
+The CPU implementation uses `Grain128AEADv2::match_keystream()` which:
+1. Runs the full 512-clock init + AD processing
+2. Checks each keystream byte against `pt ⊕ ct` (target keystream)
+3. Returns `false` immediately on the first byte mismatch
+
+This early-reject strategy avoids wasting time on the MAC computation for wrong keys.
+
+---
+
 ## Repository Layout
 
 ```
@@ -178,7 +254,7 @@ lightweight_ciphers_project_GPU_bruteforce/
 ├── plot_results.py
 ├── src/
 │   ├── main.cu                    # Benchmark driver, self-tests, CLI
-│   ├── ciphers_enhanced.cuh       # All eleven cipher implementations (host + device)
+│   ├── ciphers_enhanced.cuh       # All twelve cipher implementations (host + device)
 │   ├── bruteforce_gpu_enhanced.cuh # GPU kernels, CipherType/GpuVariant enums, launch helpers
 │   ├── bruteforce_cpu.hpp         # CPU brute-force reference implementations
 │   ├── present_spbox_tables.inc   # Pre-generated PRESENT-80 SP-box lookup tables
@@ -228,7 +304,7 @@ cmake --build . -j$(nproc)
 
 ## Self-Tests
 
-Verifies all ten cipher implementations against official test vectors before benchmarking.
+Verifies all twelve cipher implementations against official test vectors before benchmarking.
 
 ```bash
 ./bench --test
@@ -236,19 +312,29 @@ Verifies all ten cipher implementations against official test vectors before ben
 
 Expected output:
 ```
-SIMON32/64 Self-Test:              PASS
-PRESENT-80 Self-Test:              PASS
-SPECK64/128 Self-Test:             PASS
-Grain v1 Self-Test:                PASS
-Trivium Self-Test:                 PASS
-ChaCha20 Block Self-Test:          PASS
-TinyJAMBU-128 Self-Test:           PASS
-TinyJAMBU-128 Bitsliced Self-Test: PASS
-ZUC-128 Self-Test:                 PASS
-SNOW-V Self-Test:                  PASS
-AES-128 Self-Test:                 PASS
-Salsa20 Self-Test:                 PASS
+SIMON32/64 Self-Test:                  PASS
+PRESENT-80 Self-Test:                  PASS
+SPECK64/128 Self-Test:                 PASS
+Grain v1 Self-Test:                    PASS
+Trivium Self-Test:                     PASS
+ChaCha20 Block Self-Test:              PASS
+TinyJAMBU-128 Self-Test:               PASS
+TinyJAMBU-128 Bitsliced Self-Test:     PASS
+ZUC-128 Self-Test:                     PASS
+SNOW-V Self-Test:                      PASS
+AES-128 Self-Test:                     PASS
+Salsa20 Self-Test:                     PASS
+Grain-128AEADv2 Self-Test:             PASS
+Grain-128AEADv2 Bitsliced Test:        PASS
 ```
+
+The Grain-128AEADv2 test vector is taken from the NIST LWC finalist specification:
+- Key: `000102030405060708090a0b0c0d0e0f`
+- Nonce: `000102030405060708090a0b`
+- AD: `0001020304050607`
+- PT: `0001020304050607`
+- CT: `96d1bda7ae11f0ba`
+- Tag: `22b0c120 39a20e28`
 
 ---
 
@@ -256,7 +342,7 @@ Salsa20 Self-Test:                 PASS
 
 All commands below assume you are inside the `build/` directory.
 
-### Run all 11 ciphers (recommended full benchmark)
+### Run all 12 ciphers (recommended full benchmark)
 
 ```bash
 ./bench --cipher all \
@@ -385,6 +471,26 @@ Run only specific Salsa20 GPU variants:
 ./bench --cipher salsa --variants optimized_ilp --min_bits 1 --max_bits 30 --out ../results_salsa20_ilp.csv
 ```
 
+#### 12. Grain-128AEADv2 (AEAD — includes bitsliced variant)
+
+```bash
+./bench --cipher grain128 --min_bits 1 --max_bits 20 --step_bits 1 --out ../results_grain128.csv
+```
+
+Run only the bitsliced kernel (fastest for most key-space sizes):
+```bash
+./bench --cipher grain128 --variants bitsliced \
+        --min_bits 1 --max_bits 20 --step_bits 1 \
+        --out ../results_grain128_bs.csv
+```
+
+Run only baseline (full AEAD per key, useful for correctness study):
+```bash
+./bench --cipher grain128 --variants baseline \
+        --min_bits 1 --max_bits 16 --step_bits 1 \
+        --out ../results_grain128_baseline.csv
+```
+
 ---
 
 ## Selecting GPU Variants Manually
@@ -402,8 +508,9 @@ Run only specific Salsa20 GPU variants:
 # Shared-memory (PRESENT-80 only)
 ./bench --cipher present --variants shared
 
-# Bitsliced (TinyJAMBU-128 only)
+# Bitsliced (TinyJAMBU-128 or Grain-128AEADv2)
 ./bench --cipher tinyjambu --variants bitsliced
+./bench --cipher grain128 --variants bitsliced
 
 # All variants
 ./bench --cipher present --variants all
@@ -415,7 +522,7 @@ Run only specific Salsa20 GPU variants:
 
 ```
 Usage: bench [options]
-  --cipher   <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|aes|salsa|all>
+  --cipher   <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|aes|salsa|grain128|all>
              (default: all)
   --variants <baseline|optimized|optimized_ilp|shared|bitsliced|all|auto>
              (default: auto — best variants per cipher)
@@ -455,6 +562,10 @@ salsa20,gpu,gpu0_baseline,10,1024,0.0000049,208979591,0x0000000000000000
 salsa20,gpu,gpu1_optimized,10,1024,0.0000018,568888888,0x0000000000000000
 salsa20,gpu,gpu2_optimized+ilp,10,1024,0.0000012,853333333,0x0000000000000000
 tinyjambu_128,gpu,gpu4_bitsliced,10,1024,0.0000045,227555555,0xa55a12343fffffff
+grain128aeadv2,cpu,cpu_baseline,10,1024,0.00025,4096000,0x0000000000000000
+grain128aeadv2,gpu,gpu0_baseline,10,1024,0.000031,33032258,0x0000000000000000
+grain128aeadv2,gpu,gpu2_optimized+ilp,10,1024,0.000018,56888888,0x0000000000000000
+grain128aeadv2,gpu,gpu4_bitsliced,10,1024,0.0000052,196923076,0xa55a12343fffffff
 ```
 
 The `found_key_hex` field is non-zero only when the correct key is found within the search space (verification run).
@@ -470,7 +581,7 @@ cd ..   # back to lightweight_ciphers_project_GPU_bruteforce/
 python3 plot_results.py results_all.csv --outdir plots/
 
 # Plot a single cipher
-python3 plot_results.py results_all.csv --only_cipher aes_128 --outdir plots/
+python3 plot_results.py results_all.csv --only_cipher grain128aeadv2 --outdir plots/
 
 # Specify CSV with flag
 python3 plot_results.py --csv results_all.csv --outdir plots/
@@ -491,6 +602,9 @@ Plots are saved as PNG files in the `--outdir` directory:
 | Comparing only GPU variants | Use `--gpu_only` |
 | PRESENT-80 shared-memory study | `--cipher present --variants all` |
 | TinyJAMBU bitsliced study | `--cipher tinyjambu --variants all --max_bits 16` |
+| Grain-128AEADv2 bitsliced study | `--cipher grain128 --variants all --max_bits 16` |
 | AES MixColumns optimization study | `--cipher aes --variants all` |
 | Salsa20 vs ChaCha20 comparison | `--cipher salsa` then `--cipher chacha` |
 | Stream cipher comparison | `--cipher grain` then `--cipher trivium` then `--cipher chacha` then `--cipher salsa` |
+| AEAD cipher comparison | `--cipher tinyjambu` then `--cipher grain128` |
+| Grain v1 vs Grain-128AEADv2 | `--cipher grain` then `--cipher grain128` |

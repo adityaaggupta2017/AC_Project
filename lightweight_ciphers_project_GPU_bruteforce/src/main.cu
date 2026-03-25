@@ -123,6 +123,17 @@ struct TestVector_Salsa20Bench {
   int length;
 };
 
+struct TestVector_Grain128AEADv2 {
+  uint8_t key[16];
+  uint8_t nonce[12];
+  uint8_t pt[32];
+  uint8_t ct[32];
+  uint8_t ad[32];
+  uint8_t tag[8];
+  int pt_len;
+  int ad_len;
+};
+
 // SIMON 32/64 official test vector
 static TestVector_Simon simon_tv() {
   uint64_t key = 0;
@@ -491,6 +502,59 @@ static TestVector_Salsa20Bench salsa20_bench_tv() {
   return tv;
 }
 
+// Grain-128AEADv2 NIST LWC test vector
+static TestVector_Grain128AEADv2 grain128aeadv2_nist_tv() {
+  TestVector_Grain128AEADv2 tv;
+  memset(&tv, 0, sizeof(tv));
+
+  const uint8_t key[16] = {0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
+                            0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f};
+  memcpy(tv.key, key, 16);
+
+  const uint8_t nonce[12] = {0x00,0x01,0x02,0x03,0x04,0x05,
+                              0x06,0x07,0x08,0x09,0x0a,0x0b};
+  memcpy(tv.nonce, nonce, 12);
+
+  const uint8_t ad[8] = {0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07};
+  memcpy(tv.ad, ad, 8);
+  tv.ad_len = 8;
+
+  const uint8_t pt[8] = {0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07};
+  memcpy(tv.pt, pt, 8);
+  tv.pt_len = 8;
+
+  const uint8_t ct[8] = {0x96,0xd1,0xbd,0xa7,0xae,0x11,0xf0,0xba};
+  memcpy(tv.ct, ct, 8);
+
+  const uint8_t tag[8] = {0x22,0xb0,0xc1,0x20,0x39,0xa2,0x0e,0x28};
+  memcpy(tv.tag, tag, 8);
+
+  return tv;
+}
+
+// Grain-128AEADv2 benchmark input
+static TestVector_Grain128AEADv2 grain128aeadv2_bench_tv() {
+  TestVector_Grain128AEADv2 tv;
+  memset(&tv, 0, sizeof(tv));
+
+  store_u64_le(bench_key64_last_candidate(), tv.key, 8);
+
+  tv.nonce[0] = 0x11; tv.nonce[1] = 0x22; tv.nonce[2] = 0x33; tv.nonce[3] = 0x44;
+
+  const char* msg = "Hello Grain 128!";
+  tv.pt_len = (int)strlen(msg);
+  memcpy(tv.pt, msg, tv.pt_len);
+
+  const char* ad_msg = "AuthData";
+  tv.ad_len = (int)strlen(ad_msg);
+  memcpy(tv.ad, ad_msg, tv.ad_len);
+
+  Grain128AEADv2::process(tv.pt, tv.ct, tv.pt_len,
+                          tv.ad, tv.ad_len, tv.tag,
+                          tv.key, tv.nonce);
+  return tv;
+}
+
 // ============================================================
 // Self-Tests
 // ============================================================
@@ -730,6 +794,60 @@ static bool self_test_salsa20() {
   return pass;
 }
 
+static bool self_test_grain128aeadv2() {
+  auto tv = grain128aeadv2_nist_tv();
+  uint8_t computed_ct[32];
+  uint8_t computed_tag[8];
+
+  Grain128AEADv2::process(tv.pt, computed_ct, tv.pt_len,
+                          tv.ad, tv.ad_len, computed_tag,
+                          tv.key, tv.nonce);
+
+  bool pass_ct  = (memcmp(computed_ct,  tv.ct,  tv.pt_len) == 0);
+  bool pass_tag = (memcmp(computed_tag, tv.tag, 8)         == 0);
+  bool pass     = pass_ct && pass_tag;
+
+  std::cout << "Grain-128AEADv2 Self-Test: " << (pass ? "PASS" : "FAIL") << "\n";
+  if (!pass) {
+    if (!pass_ct) {
+      std::cout << "  CT Expected:  " << bytes_to_hex(tv.ct, tv.pt_len) << "\n";
+      std::cout << "  CT Got:       " << bytes_to_hex(computed_ct, tv.pt_len) << "\n";
+    }
+    if (!pass_tag) {
+      std::cout << "  Tag Expected: " << bytes_to_hex(tv.tag, 8) << "\n";
+      std::cout << "  Tag Got:      " << bytes_to_hex(computed_tag, 8) << "\n";
+    }
+  }
+  return pass;
+}
+
+static bool self_test_grain128aeadv2_bitsliced() {
+  auto tv = grain128aeadv2_nist_tv();
+
+  uint32_t key_bitsliced[128] = {0};
+  uint32_t nonce_bitsliced[96] = {0};
+
+  for (int i = 0; i < 128; i++) {
+    uint32_t bit_val = (tv.key[i / 8] >> (i % 8)) & 1;
+    key_bitsliced[i] = bit_val ? 0xFFFFFFFF : 0x00000000;
+  }
+  for (int i = 0; i < 96; i++) {
+    uint32_t bit_val = (tv.nonce[i / 8] >> (i % 8)) & 1;
+    nonce_bitsliced[i] = bit_val ? 0xFFFFFFFF : 0x00000000;
+  }
+
+  uint32_t match_mask = Grain128AEADv2_Bitsliced::match_keys(
+    key_bitsliced, nonce_bitsliced, tv.ad_len, tv.pt, tv.ct, tv.pt_len);
+
+  bool pass = (match_mask == 0xFFFFFFFF);
+  std::cout << "Grain-128AEADv2 Bitsliced Test: " << (pass ? "PASS" : "FAIL") << "\n";
+  if (!pass) {
+    std::cout << "  Expected Mask: 0xffffffff\n";
+    std::cout << "  Got Mask:      0x" << std::hex << match_mask << std::dec << "\n";
+  }
+  return pass;
+}
+
 static bool run_all_self_tests() {
   bool ok = true;
   ok &= self_test_simon();
@@ -744,6 +862,8 @@ static bool run_all_self_tests() {
   ok &= self_test_snow_v();
   ok &= self_test_aes();
   ok &= self_test_salsa20();
+  ok &= self_test_grain128aeadv2();
+  ok &= self_test_grain128aeadv2_bitsliced();
   return ok;
 }
 
@@ -797,7 +917,7 @@ static Args parse_args(int argc, char** argv) {
     else if (s == "--help" || s == "-h") {
       std::cout
         << "Usage: bench [options]\n"
-        << "  --cipher <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|aes|salsa|all> (default: all)\n"
+        << "  --cipher <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|aes|salsa|grain128|all> (default: all)\n"
         << "  --variants <baseline|optimized|optimized_ilp|shared|all|auto> (default: auto)\n"
         << "  --out results.csv\n"
         << "  --min_bits 1 --max_bits 30 --step_bits 1\n"
@@ -819,8 +939,8 @@ static inline std::vector<GpuVariant> selected_gpu_variants(const Args& a, Ciphe
   if (a.variants == "shared") return {GpuVariant::OPTIMIZED_SHARED};
   if (a.variants == "all") return {GpuVariant::BASELINE, GpuVariant::OPTIMIZED, GpuVariant::OPTIMIZED_ILP, GpuVariant::OPTIMIZED_SHARED};
 
-  // TinyJAMBU uses BASELINE + ILP + BITSLICED (no simple keystream early-reject)
-  if (cipher == CipherType::TINYJAMBU_128)
+  // AEAD ciphers use BASELINE + ILP + BITSLICED (no simple keystream early-reject)
+  if (cipher == CipherType::TINYJAMBU_128 || cipher == CipherType::GRAIN128_AEADV2)
     return {GpuVariant::BASELINE, GpuVariant::OPTIMIZED_ILP, GpuVariant::BITSLICED};
 
   // PRESENT supports shared-memory table variant
@@ -1259,6 +1379,46 @@ static void benchmark_salsa20(const Args& a) {
   }
 }
 
+static void benchmark_grain128aeadv2(const Args& a) {
+  std::cout << "\n=== Grain-128AEADv2 Benchmark ===\n";
+  auto tv = grain128aeadv2_bench_tv();
+
+  for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+    uint64_t known_high = 0;
+    uint64_t N = bf_space_size_main(b);
+
+    std::cout << "\nunknown_bits=" << b << " (keys=" << N << ")\n";
+
+    if (a.run_cpu) {
+      auto cr = brute_force_cpu_grain128aeadv2(tv.pt, tv.ct, tv.nonce, tv.pt_len,
+                                               tv.ad, tv.ad_len, known_high, b, a.cpu_repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "CPU:               " << cr.seconds << " s, " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "grain128aeadv2,cpu,cpu_baseline," << b << "," << cr.keys_tested << ","
+          << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+
+    if (a.run_gpu) {
+      for (auto v : selected_gpu_variants(a, CipherType::GRAIN128_AEADV2)) {
+        auto gr = brute_force_gpu_enhanced_aead(CipherType::GRAIN128_AEADV2,
+                                                tv.pt, tv.ct, tv.nonce, tv.pt_len,
+                                                tv.ad, tv.ad_len, tv.tag,
+                                                known_high, b, v, a.blocks, a.threads, a.gpu_repeats);
+        double kps = safe_kps(gr.keys_tested, gr.seconds);
+        std::cout << "GPU " << gpu_variant_name(v) << ": " << gr.seconds << " s, "
+                  << kps << " keys/s, found=" << (gr.found ? "yes" : "no") << "\n";
+        std::ostringstream row;
+        row << "grain128aeadv2,gpu," << gpu_variant_name(v) << "," << b << ","
+            << gr.keys_tested << "," << gr.seconds << "," << kps << ","
+            << u64_hex(gr.found ? gr.found_key : 0);
+        csv_append_row(a.out_csv, row.str());
+      }
+    }
+  }
+}
+
 // ============================================================
 // main
 // ============================================================
@@ -1292,9 +1452,10 @@ int main(int argc, char** argv) {
     else if (name == "snowv") benchmark_snowv(a);
     else if (name == "aes") benchmark_aes(a);
     else if (name == "salsa") benchmark_salsa20(a);
+    else if (name == "grain128") benchmark_grain128aeadv2(a);
     else {
       std::cerr << "Unknown cipher: " << name << "\n";
-      std::cerr << "Valid: simon, present, speck, grain, trivium, chacha, tinyjambu, zuc, snowv, aes, salsa, all\n";
+      std::cerr << "Valid: simon, present, speck, grain, trivium, chacha, tinyjambu, zuc, snowv, aes, salsa, grain128, all\n";
       std::exit(1);
     }
   };
@@ -1311,6 +1472,7 @@ int main(int argc, char** argv) {
     benchmark_snowv(a);
     benchmark_aes(a);
     benchmark_salsa20(a);
+    benchmark_grain128aeadv2(a);
   } else {
     run_one(a.cipher);
   }

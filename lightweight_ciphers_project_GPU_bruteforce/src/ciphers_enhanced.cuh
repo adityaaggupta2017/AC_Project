@@ -1939,3 +1939,265 @@ struct AES128 {
   }
 };
 
+// ============================================================
+// GRAIN-128AEADv2 - Lightweight Authenticated Stream Cipher
+// Key: 128 bits, Nonce: 96 bits, Tag: 64 bits
+// Based on NIST LWC Finalist Specification
+// ============================================================
+struct Grain128AEADv2 {
+    // LFSR feedback polynomial f(x)
+    __host__ __device__ static inline uint8_t lfsr_fb(const uint8_t lfsr[128]) {
+        return lfsr[0] ^ lfsr[7] ^ lfsr[38] ^ lfsr[70] ^ lfsr[81] ^ lfsr[96];
+    }
+
+    // NFSR feedback polynomial g(x)
+    __host__ __device__ static inline uint8_t nfsr_fb(const uint8_t lfsr[128], const uint8_t nfsr[128]) {
+        return lfsr[0] ^ nfsr[0] ^ nfsr[26] ^ nfsr[56] ^ nfsr[91] ^ nfsr[96] ^
+               (nfsr[3] & nfsr[67]) ^
+               (nfsr[11] & nfsr[13]) ^
+               (nfsr[17] & nfsr[18]) ^
+               (nfsr[27] & nfsr[59]) ^
+               (nfsr[40] & nfsr[48]) ^
+               (nfsr[61] & nfsr[65]) ^
+               (nfsr[68] & nfsr[84]) ^
+               (nfsr[22] & nfsr[24] & nfsr[25]) ^
+               (nfsr[70] & nfsr[78] & nfsr[82]) ^
+               (nfsr[88] & nfsr[92] & nfsr[93] & nfsr[95]);
+    }
+
+    // Boolean pre-output function h(x)
+    __host__ __device__ static inline uint8_t h_func(const uint8_t lfsr[128], const uint8_t nfsr[128]) {
+        uint8_t x0 = nfsr[12], x1 = lfsr[8],  x2 = lfsr[13], x3 = lfsr[20];
+        uint8_t x4 = nfsr[95], x5 = lfsr[42], x6 = lfsr[60], x7 = lfsr[79], x8 = lfsr[94];
+        return (x0 & x1) ^ (x2 & x3) ^ (x4 & x5) ^ (x6 & x7) ^ (x0 & x4 & x8);
+    }
+
+    // Main pre-output bit y_t
+    __host__ __device__ static inline uint8_t output_bit(const uint8_t lfsr[128], const uint8_t nfsr[128]) {
+        uint8_t h_out = h_func(lfsr, nfsr);
+        return h_out ^ lfsr[93] ^ nfsr[2] ^ nfsr[15] ^ nfsr[36] ^ nfsr[45] ^ nfsr[64] ^ nfsr[73] ^ nfsr[89];
+    }
+
+    __host__ __device__ static inline uint8_t clock_cipher(uint8_t lfsr[128], uint8_t nfsr[128], uint8_t lfsr_extra_fb = 0, uint8_t nfsr_extra_fb = 0, bool init_phase = false) {
+        uint8_t y = output_bit(lfsr, nfsr);
+        uint8_t base_fb = init_phase ? y : 0;
+        uint8_t lfsr_new = lfsr_fb(lfsr) ^ base_fb ^ lfsr_extra_fb;
+        uint8_t nfsr_new = nfsr_fb(lfsr, nfsr) ^ base_fb ^ nfsr_extra_fb;
+        #pragma unroll 16
+        for (int j = 0; j < 127; j++) {
+            lfsr[j] = lfsr[j + 1];
+            nfsr[j] = nfsr[j + 1];
+        }
+        lfsr[127] = lfsr_new;
+        nfsr[127] = nfsr_new;
+        return y;
+    }
+
+    // 512-Round Initialization
+    __host__ __device__ static inline void init(const uint8_t key[16], const uint8_t nonce[12],
+                                                uint8_t lfsr[128], uint8_t nfsr[128],
+                                                uint8_t auth_acc[64], uint8_t auth_sr[64]) {
+        uint8_t key_bits[128];
+        #pragma unroll
+        for (int i = 0; i < 128; i++) {
+            key_bits[i] = (key[i / 8] >> (i % 8)) & 1;
+            nfsr[i] = key_bits[i];
+        }
+        #pragma unroll
+        for (int i = 0; i < 96; i++) {
+            lfsr[i] = (nonce[i / 8] >> (i % 8)) & 1;
+        }
+        #pragma unroll
+        for (int i = 96; i < 127; i++) lfsr[i] = 1;
+        lfsr[127] = 0;
+
+        for (int t = 0; t < 320; t++) clock_cipher(lfsr, nfsr, 0, 0, true);
+        for (int t = 0; t < 64; t++) clock_cipher(lfsr, nfsr, key_bits[t + 64], key_bits[t], true);
+        for (int j = 0; j < 64; j++) auth_acc[j] = clock_cipher(lfsr, nfsr, 0, 0, false);
+        for (int j = 0; j < 64; j++) auth_sr[j]  = clock_cipher(lfsr, nfsr, 0, 0, false);
+    }
+
+    __host__ __device__ static inline void auth_update(uint8_t m_i, uint8_t auth_acc[64], uint8_t auth_sr[64], uint8_t z_prime) {
+        if (m_i == 1) {
+            #pragma unroll 16
+            for (int j = 0; j < 64; j++) auth_acc[j] ^= auth_sr[j];
+        }
+        #pragma unroll 16
+        for (int j = 0; j < 63; j++) auth_sr[j] = auth_sr[j + 1];
+        auth_sr[63] = z_prime;
+    }
+
+    __host__ __device__ static inline void process_ad_byte(uint8_t ad_byte, uint8_t lfsr[128], uint8_t nfsr[128], uint8_t auth_acc[64], uint8_t auth_sr[64]) {
+        #pragma unroll
+        for (int bit = 0; bit < 8; bit++) {
+            uint8_t m_i = (ad_byte >> bit) & 1;
+            clock_cipher(lfsr, nfsr);
+            uint8_t z_p = clock_cipher(lfsr, nfsr);
+            auth_update(m_i, auth_acc, auth_sr, z_p);
+        }
+    }
+
+    // Full AEAD Process
+    __host__ __device__ static inline void process(const uint8_t* pt, uint8_t* ct, int pt_len,
+                                                   const uint8_t* ad, int ad_len, uint8_t tag[8],
+                                                   const uint8_t key[16], const uint8_t nonce[12]) {
+        uint8_t lfsr[128], nfsr[128], auth_acc[64], auth_sr[64];
+        init(key, nonce, lfsr, nfsr, auth_acc, auth_sr);
+
+        // Process AD Length (DER Encoding)
+        if (ad_len < 128) {
+            process_ad_byte((uint8_t)ad_len, lfsr, nfsr, auth_acc, auth_sr);
+        } else if (ad_len < 256) {
+            process_ad_byte(0x81, lfsr, nfsr, auth_acc, auth_sr);
+            process_ad_byte((uint8_t)ad_len, lfsr, nfsr, auth_acc, auth_sr);
+        } else {
+            process_ad_byte(0x82, lfsr, nfsr, auth_acc, auth_sr);
+            process_ad_byte((uint8_t)(ad_len >> 8), lfsr, nfsr, auth_acc, auth_sr);
+            process_ad_byte((uint8_t)(ad_len & 0xFF), lfsr, nfsr, auth_acc, auth_sr);
+        }
+
+        for (int i = 0; i < ad_len; i++) process_ad_byte(ad[i], lfsr, nfsr, auth_acc, auth_sr);
+
+        for (int i = 0; i < pt_len; i++) {
+            uint8_t ct_byte = 0;
+            for (int bit = 0; bit < 8; bit++) {
+                uint8_t m_i = (pt[i] >> bit) & 1;
+                uint8_t z_i = clock_cipher(lfsr, nfsr);
+                uint8_t z_p = clock_cipher(lfsr, nfsr);
+                ct_byte |= ((m_i ^ z_i) << bit);
+                auth_update(m_i, auth_acc, auth_sr, z_p);
+            }
+            ct[i] = ct_byte;
+        }
+
+        clock_cipher(lfsr, nfsr);
+        uint8_t z_pad = clock_cipher(lfsr, nfsr);
+        auth_update(1, auth_acc, auth_sr, z_pad);
+
+        for (int i = 0; i < 8; i++) {
+            uint8_t tag_byte = 0;
+            for (int bit = 0; bit < 8; bit++) tag_byte |= (auth_acc[i * 8 + bit] << bit);
+            tag[i] = tag_byte;
+        }
+    }
+
+    // Early Reject Matching (skips tag — aborts on first bad keystream byte)
+    __host__ __device__ static inline bool match_keystream(const uint8_t key[16], const uint8_t nonce[12],
+                                                           const uint8_t* ad, int ad_len,
+                                                           const uint8_t* target_ks, int pt_len) {
+        uint8_t lfsr[128], nfsr[128], auth_acc[64], auth_sr[64];
+        init(key, nonce, lfsr, nfsr, auth_acc, auth_sr);
+
+        if (ad_len < 128) {
+            process_ad_byte((uint8_t)ad_len, lfsr, nfsr, auth_acc, auth_sr);
+        } else if (ad_len < 256) {
+            process_ad_byte(0x81, lfsr, nfsr, auth_acc, auth_sr);
+            process_ad_byte((uint8_t)ad_len, lfsr, nfsr, auth_acc, auth_sr);
+        } else {
+            process_ad_byte(0x82, lfsr, nfsr, auth_acc, auth_sr);
+            process_ad_byte((uint8_t)(ad_len >> 8), lfsr, nfsr, auth_acc, auth_sr);
+            process_ad_byte((uint8_t)(ad_len & 0xFF), lfsr, nfsr, auth_acc, auth_sr);
+        }
+        for (int i = 0; i < ad_len; i++) process_ad_byte(ad[i], lfsr, nfsr, auth_acc, auth_sr);
+
+        for (int i = 0; i < pt_len; i++) {
+            uint8_t ks_byte = 0;
+            #pragma unroll
+            for (int bit = 0; bit < 8; bit++) {
+                uint8_t z_i = clock_cipher(lfsr, nfsr);
+                clock_cipher(lfsr, nfsr);
+                ks_byte |= (z_i << bit);
+            }
+            if (ks_byte != target_ks[i]) return false;
+        }
+        return true;
+    }
+};
+
+// ============================================================
+// GRAIN-128AEADv2 - BITSLICED (32 Parallel Keys)
+// ============================================================
+struct Grain128AEADv2_Bitsliced {
+    __host__ __device__ static inline uint32_t lfsr_fb(const uint32_t lfsr[128]) {
+        return lfsr[0] ^ lfsr[7] ^ lfsr[38] ^ lfsr[70] ^ lfsr[81] ^ lfsr[96];
+    }
+
+    __host__ __device__ static inline uint32_t nfsr_fb(const uint32_t lfsr[128], const uint32_t nfsr[128]) {
+        return lfsr[0] ^ nfsr[0] ^ nfsr[26] ^ nfsr[56] ^ nfsr[91] ^ nfsr[96] ^
+               (nfsr[3] & nfsr[67]) ^
+               (nfsr[11] & nfsr[13]) ^
+               (nfsr[17] & nfsr[18]) ^
+               (nfsr[27] & nfsr[59]) ^
+               (nfsr[40] & nfsr[48]) ^
+               (nfsr[61] & nfsr[65]) ^
+               (nfsr[68] & nfsr[84]) ^
+               (nfsr[22] & nfsr[24] & nfsr[25]) ^
+               (nfsr[70] & nfsr[78] & nfsr[82]) ^
+               (nfsr[88] & nfsr[92] & nfsr[93] & nfsr[95]);
+    }
+
+    __host__ __device__ static inline uint32_t h_func(const uint32_t lfsr[128], const uint32_t nfsr[128]) {
+        uint32_t x0 = nfsr[12], x1 = lfsr[8],  x2 = lfsr[13], x3 = lfsr[20];
+        uint32_t x4 = nfsr[95], x5 = lfsr[42], x6 = lfsr[60], x7 = lfsr[79], x8 = lfsr[94];
+        return (x0 & x1) ^ (x2 & x3) ^ (x4 & x5) ^ (x6 & x7) ^ (x0 & x4 & x8);
+    }
+
+    __host__ __device__ static inline uint32_t output_bit(const uint32_t lfsr[128], const uint32_t nfsr[128]) {
+        return h_func(lfsr, nfsr) ^ lfsr[93] ^ nfsr[2] ^ nfsr[15] ^ nfsr[36] ^ nfsr[45] ^ nfsr[64] ^ nfsr[73] ^ nfsr[89];
+    }
+
+    __host__ __device__ static inline uint32_t clock_cipher(uint32_t lfsr[128], uint32_t nfsr[128], uint32_t lfsr_extra_fb = 0, uint32_t nfsr_extra_fb = 0, bool init_phase = false) {
+        uint32_t y = output_bit(lfsr, nfsr);
+        uint32_t base_fb = init_phase ? y : 0;
+        uint32_t lfsr_new = lfsr_fb(lfsr) ^ base_fb ^ lfsr_extra_fb;
+        uint32_t nfsr_new = nfsr_fb(lfsr, nfsr) ^ base_fb ^ nfsr_extra_fb;
+        #pragma unroll 16
+        for (int j = 0; j < 127; j++) {
+            lfsr[j] = lfsr[j + 1];
+            nfsr[j] = nfsr[j + 1];
+        }
+        lfsr[127] = lfsr_new;
+        nfsr[127] = nfsr_new;
+        return y;
+    }
+
+    __host__ __device__ static inline void init(const uint32_t key_bitsliced[128], const uint32_t nonce_bitsliced[96], uint32_t lfsr[128], uint32_t nfsr[128]) {
+        #pragma unroll
+        for (int i = 0; i < 128; i++) nfsr[i] = key_bitsliced[i];
+        #pragma unroll
+        for (int i = 0; i < 96; i++) lfsr[i] = nonce_bitsliced[i];
+        #pragma unroll
+        for (int i = 96; i < 127; i++) lfsr[i] = 0xFFFFFFFF;
+        lfsr[127] = 0x00000000;
+
+        for (int t = 0; t < 320; t++) clock_cipher(lfsr, nfsr, 0, 0, true);
+        for (int t = 0; t < 64; t++) clock_cipher(lfsr, nfsr, key_bitsliced[t + 64], key_bitsliced[t], true);
+    }
+
+    // Takes 32 keys and returns a bitmask of which ones match the target keystream
+    __host__ __device__ static inline uint32_t match_keys(const uint32_t key_bitsliced[128], const uint32_t nonce_bitsliced[96], int ad_len, const uint8_t* pt, const uint8_t* ct, int pt_len) {
+        uint32_t lfsr[128], nfsr[128];
+        init(key_bitsliced, nonce_bitsliced, lfsr, nfsr);
+
+        // Fast-forward past MAC init (128 clocks) and AD processing
+        int der_len = (ad_len < 128) ? 1 : (ad_len < 256) ? 2 : 3;
+        int ad_clocks = (der_len + ad_len) * 16;
+        int skip_clocks = 128 + ad_clocks;
+        for (int i = 0; i < skip_clocks; i++) clock_cipher(lfsr, nfsr);
+
+        uint32_t match_mask = 0xFFFFFFFF;
+
+        for (int i = 0; i < pt_len; i++) {
+            for (int bit = 0; bit < 8; bit++) {
+                uint32_t z_i = clock_cipher(lfsr, nfsr);
+                clock_cipher(lfsr, nfsr);
+                uint32_t ks_bit = ((pt[i] ^ ct[i]) >> bit) & 1;
+                uint32_t expected_bit = (uint32_t)(-(int32_t)ks_bit);
+                match_mask &= ~(z_i ^ expected_bit);
+            }
+            if (match_mask == 0) return 0;
+        }
+        return match_mask;
+    }
+};
+
