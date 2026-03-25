@@ -1076,7 +1076,6 @@ snow_v,cpu,cpu_baseline,30,1073741824,918.281,1.1693e+06,0xa55a12343fffffff
 snow_v,gpu,gpu0_baseline,30,1073741824,1.32851,8.08231e+08,0xa55a12343fffffff
 snow_v,gpu,gpu1_optimized,30,1073741824,0.668488,1.60623e+09,0xa55a12343fffffff
 snow_v,gpu,gpu2_optimized+ilp,30,1073741824,0.687584,1.56162e+09,0xa55a12343fffffff
-cipher,platform,variant,unknown_bits,keys_tested,seconds,keys_per_sec,found_key
 aes128,cpu,cpu_baseline,1,2,1.47667e-06,1.3544e+06,0x0000000000000000
 aes128,gpu,gpu0_baseline,1,2,3.90016e-05,51280,0x0000000000000000
 aes128,gpu,gpu1_optimized,1,2,2.36576e-05,84539.4,0x0000000000000000
@@ -1197,7 +1196,6 @@ aes128,cpu,cpu_baseline,30,1073741824,312.197,3.4393e+06,0x0000000000000000
 aes128,gpu,gpu0_baseline,30,1073741824,63.9855,1.6781e+07,0x0000000000000000
 aes128,gpu,gpu1_optimized,30,1073741824,62.5255,1.71729e+07,0x0000000000000000
 aes128,gpu,gpu2_optimized+ilp,30,1073741824,66.4591,1.61564e+07,0x0000000000000000
-cipher,platform,variant,unknown_bits,keys_tested,seconds,keys_per_sec,found_key
 salsa20,cpu,cpu_baseline,1,2,5.56667e-07,3.59281e+06,0xa55a12343fffffff
 salsa20,gpu,gpu0_baseline,1,2,6.6528e-06,300625,0xa55a12343fffffff
 salsa20,gpu,gpu1_optimized,1,2,5.8208e-06,343595,0xa55a12343fffffff

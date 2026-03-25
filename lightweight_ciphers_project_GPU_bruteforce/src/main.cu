@@ -1312,8 +1312,11 @@ static void benchmark_aes(const Args& a) {
   printf("\n=== AES-128 Benchmark ===\n");
   auto tv = aes_bench_tv();
 
+  uint64_t key64 = 0;
+  for (int i = 0; i < 8; i++) key64 |= ((uint64_t)tv.key[i]) << (i * 8);
+
   for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
-    uint64_t known_high = 0;
+    uint64_t known_high = key64 >> b;
     printf("\nunknown_bits=%d (keys=%llu)\n", b, bf_space_size_main(b));
 
     if (a.run_cpu) {
@@ -1383,8 +1386,11 @@ static void benchmark_grain128aeadv2(const Args& a) {
   std::cout << "\n=== Grain-128AEADv2 Benchmark ===\n";
   auto tv = grain128aeadv2_bench_tv();
 
+  uint64_t key64 = 0;
+  for (int i = 0; i < 8; i++) key64 |= ((uint64_t)tv.key[i]) << (i * 8);
+
   for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
-    uint64_t known_high = 0;
+    uint64_t known_high = key64 >> b;
     uint64_t N = bf_space_size_main(b);
 
     std::cout << "\nunknown_bits=" << b << " (keys=" << N << ")\n";
