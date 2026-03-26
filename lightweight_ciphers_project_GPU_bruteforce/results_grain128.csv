@@ -111,3 +111,11 @@ grain128aeadv2,cpu,cpu_baseline,28,268435456,2273.38,118078,0xa55a12343fffffff
 grain128aeadv2,gpu,gpu0_baseline,28,268435456,195.198,1.3752e+06,0xa55a12343fffffff
 grain128aeadv2,gpu,gpu2_optimized+ilp,28,268435456,143.789,1.86687e+06,0xa55a12343fffffff
 grain128aeadv2,gpu,gpu4_bitsliced,28,268435456,17.5102,1.53302e+07,0xa55a12343fffffff
+grain128aeadv2,cpu,cpu_baseline,29,536870912,4547.38,118062,0xa55a12343fffffff
+grain128aeadv2,gpu,gpu0_baseline,29,536870912,390.703,1.37412e+06,0xa55a12343fffffff
+grain128aeadv2,gpu,gpu2_optimized+ilp,29,536870912,299.239,1.79412e+06,0xa55a12343fffffff
+grain128aeadv2,gpu,gpu4_bitsliced,29,536870912,35.1065,1.52926e+07,0xa55a12343fffffff
+grain128aeadv2,cpu,cpu_baseline,30,1073741824,9162.32,117191,0xa55a12343fffffff
+grain128aeadv2,gpu,gpu0_baseline,30,1073741824,787.211,1.36398e+06,0xa55a12343fffffff
+grain128aeadv2,gpu,gpu2_optimized+ilp,30,1073741824,602.924,1.78089e+06,0xa55a12343fffffff
+grain128aeadv2,gpu,gpu4_bitsliced,30,1073741824,70.7346,1.51799e+07,0xa55a12343fffffff
