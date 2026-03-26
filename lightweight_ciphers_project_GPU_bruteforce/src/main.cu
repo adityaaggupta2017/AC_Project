@@ -868,6 +868,346 @@ static bool run_all_self_tests() {
 }
 
 // ============================================================
+// Randomized Correctness Verification
+// ============================================================
+
+static bool run_random_key_verification(int verify_bits = 1) {
+  std::cout << "\n=== Randomized Key Recovery Verification ===\n";
+  std::cout << "5 random keys per cipher, unknown_bits=" << verify_bits << ", CPU brute-force\n";
+  std::cout << "Each found key is also verified against a second PT/CT pair.\n\n";
+
+  srand(42); // fixed seed for reproducibility
+
+  // Generate a random 64-bit key with the lowest verify_bits bits all set to 1,
+  // making the correct key the last candidate in the search (worst-case coverage).
+  const uint64_t low_mask = (verify_bits >= 64) ? ~0ULL : ((1ULL << verify_bits) - 1);
+  auto rkey64 = [&]() -> uint64_t {
+    return (((uint64_t)(unsigned int)rand() << 33) |
+            ((uint64_t)(unsigned int)rand() <<  1) | low_mask);
+  };
+
+  int total = 0, fail_count = 0;
+  std::vector<std::string> failures;
+
+  auto record = [&](const std::string& label, bool found, uint64_t got, uint64_t expected, bool pair2_ok) {
+    ++total;
+    bool ok = found && (got == expected) && pair2_ok;
+    if (!ok) {
+      ++fail_count;
+      std::ostringstream s;
+      s << "  FAIL  " << label << ": found=" << (found ? "yes" : "no");
+      if (found) s << " got=" << u64_hex(got) << " expected=" << u64_hex(expected);
+      if (!pair2_ok) s << " [second PT/CT mismatch]";
+      failures.push_back(s.str());
+    }
+  };
+
+  const int N = 5; // keys per cipher
+
+  // Fixed IV / nonce values used across ciphers
+  const uint8_t iv10[10]   = {0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x00,0x00};
+  const uint8_t iv8[8]     = {0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88};
+  const uint8_t iv16[16]   = {0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
+                               0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f};
+  const uint8_t nonce12[12]= {0x01,0x02,0x03,0x04,0x05,0x06,
+                               0x07,0x08,0x09,0x0a,0x0b,0x0c};
+  const uint8_t ad8[8]     = {0xca,0xfe,0xba,0xbe,0xde,0xad,0xbe,0xef};
+  uint8_t pt16[16]; memcpy(pt16,  "RandVerifyTestA!", 16);
+  uint8_t pt16b[16]; memcpy(pt16b, "SecondPairCheck!", 16);
+  uint8_t pt64[64]; memset(pt64, 0xAB, 64);
+  uint8_t pt64b[64]; memset(pt64b, 0xCD, 64);
+
+  // ── SIMON 32/64 ──────────────────────────────────────────────────────────
+  { bool cp = true;
+    for (int t = 0; t < N; t++) {
+      uint64_t key = rkey64();
+      uint16_t rk[SIMON32_64_ROUNDS];
+      Simon32_64_Enhanced::expand_key_vectorized(key, rk);
+      uint32_t p1 = 0x6c617669U, p2 = 0x4e455752U;
+      uint32_t c1 = Simon32_64_Enhanced::encrypt_optimized(p1, rk);
+      uint32_t c2 = Simon32_64_Enhanced::encrypt_optimized(p2, rk);
+      auto r = brute_force_cpu_simon(p1, c1, key >> verify_bits, verify_bits, 1);
+      bool ok2 = false;
+      if (r.found) {
+        uint16_t rk2[SIMON32_64_ROUNDS];
+        Simon32_64_Enhanced::expand_key_vectorized(r.found_key, rk2);
+        ok2 = (Simon32_64_Enhanced::encrypt_optimized(p2, rk2) == c2);
+      }
+      record("SIMON32/64 #" + std::to_string(t), r.found, r.found_key, key, ok2);
+      cp &= (r.found && r.found_key == key && ok2);
+    }
+    std::cout << "SIMON 32/64          " << (cp ? "PASS" : "FAIL") << "\n";
+  }
+
+  // ── PRESENT-80 ───────────────────────────────────────────────────────────
+  { bool cp = true;
+    for (int t = 0; t < N; t++) {
+      uint64_t key64 = rkey64();
+      uint8_t key10[10] = {0};
+      for (int i = 0; i < 8; i++) key10[i] = (uint8_t)((key64 >> (8*i)) & 0xFF);
+      uint64_t rk[PRESENT_ROUNDS+1];
+      Present80::expand_key(key10, rk);
+      uint64_t p1 = 0x0123456789ABCDEFULL, p2 = 0xFEDCBA9876543210ULL;
+      uint64_t c1 = Present80::encrypt(p1, rk), c2 = Present80::encrypt(p2, rk);
+      auto r = brute_force_cpu_present(p1, c1, key64 >> verify_bits, verify_bits, 1);
+      bool ok2 = false;
+      if (r.found) {
+        uint8_t k2[10] = {0};
+        for (int i = 0; i < 8; i++) k2[i] = (uint8_t)((r.found_key >> (8*i)) & 0xFF);
+        uint64_t rk2[PRESENT_ROUNDS+1]; Present80::expand_key(k2, rk2);
+        ok2 = (Present80::encrypt(p2, rk2) == c2);
+      }
+      record("PRESENT-80 #" + std::to_string(t), r.found, r.found_key, key64, ok2);
+      cp &= (r.found && r.found_key == key64 && ok2);
+    }
+    std::cout << "PRESENT-80           " << (cp ? "PASS" : "FAIL") << "\n";
+  }
+
+  // ── SPECK 64/128 ─────────────────────────────────────────────────────────
+  { bool cp = true;
+    for (int t = 0; t < N; t++) {
+      uint64_t key64 = rkey64();
+      uint8_t key16[16] = {0};
+      for (int i = 0; i < 8; i++) key16[i] = (uint8_t)((key64 >> (8*i)) & 0xFF);
+      uint32_t rk[SPECK64_128_ROUNDS]; Speck64_128::expand_key(key16, rk);
+      uint64_t p1 = 0x3b7265747475432dULL, p2 = 0xAABBCCDDEEFF0011ULL;
+      uint64_t c1 = Speck64_128::encrypt(p1, rk), c2 = Speck64_128::encrypt(p2, rk);
+      auto r = brute_force_cpu_speck(p1, c1, key64 >> verify_bits, verify_bits, 1);
+      bool ok2 = false;
+      if (r.found) {
+        uint8_t k2[16] = {0};
+        for (int i = 0; i < 8; i++) k2[i] = (uint8_t)((r.found_key >> (8*i)) & 0xFF);
+        uint32_t rk2[SPECK64_128_ROUNDS]; Speck64_128::expand_key(k2, rk2);
+        ok2 = (Speck64_128::encrypt(p2, rk2) == c2);
+      }
+      record("SPECK64/128 #" + std::to_string(t), r.found, r.found_key, key64, ok2);
+      cp &= (r.found && r.found_key == key64 && ok2);
+    }
+    std::cout << "SPECK 64/128         " << (cp ? "PASS" : "FAIL") << "\n";
+  }
+
+  // ── Grain v1 ─────────────────────────────────────────────────────────────
+  { bool cp = true;
+    for (int t = 0; t < N; t++) {
+      uint64_t key64 = rkey64();
+      uint8_t key10[10] = {0};
+      for (int i = 0; i < 8; i++) key10[i] = (uint8_t)((key64 >> (8*i)) & 0xFF);
+      uint8_t ct1[16] = {0}, ct2[16] = {0};
+      GrainV1::process(pt16, ct1, 16, key10, iv10);
+      GrainV1::process(pt16b, ct2, 16, key10, iv10);
+      auto r = brute_force_cpu_grain(pt16, ct1, iv10, 16, key64 >> verify_bits, verify_bits, 1);
+      bool ok2 = false;
+      if (r.found) {
+        uint8_t k2[10] = {0};
+        for (int i = 0; i < 8; i++) k2[i] = (uint8_t)((r.found_key >> (8*i)) & 0xFF);
+        uint8_t out[16]; GrainV1::process(pt16b, out, 16, k2, iv10);
+        ok2 = (memcmp(out, ct2, 16) == 0);
+      }
+      record("Grain v1 #" + std::to_string(t), r.found, r.found_key, key64, ok2);
+      cp &= (r.found && r.found_key == key64 && ok2);
+    }
+    std::cout << "Grain v1             " << (cp ? "PASS" : "FAIL") << "\n";
+  }
+
+  // ── Trivium ───────────────────────────────────────────────────────────────
+  { bool cp = true;
+    for (int t = 0; t < N; t++) {
+      uint64_t key64 = rkey64();
+      uint8_t key10[10] = {0};
+      for (int i = 0; i < 8; i++) key10[i] = (uint8_t)((key64 >> (8*i)) & 0xFF);
+      uint8_t ct1[16] = {0}, ct2[16] = {0};
+      Trivium::process(pt16, ct1, 16, key10, iv10);
+      Trivium::process(pt16b, ct2, 16, key10, iv10);
+      auto r = brute_force_cpu_trivium(pt16, ct1, iv10, 16, key64 >> verify_bits, verify_bits, 1);
+      bool ok2 = false;
+      if (r.found) {
+        uint8_t k2[10] = {0};
+        for (int i = 0; i < 8; i++) k2[i] = (uint8_t)((r.found_key >> (8*i)) & 0xFF);
+        uint8_t out[16]; Trivium::process(pt16b, out, 16, k2, iv10);
+        ok2 = (memcmp(out, ct2, 16) == 0);
+      }
+      record("Trivium #" + std::to_string(t), r.found, r.found_key, key64, ok2);
+      cp &= (r.found && r.found_key == key64 && ok2);
+    }
+    std::cout << "Trivium              " << (cp ? "PASS" : "FAIL") << "\n";
+  }
+
+  // ── ChaCha20 ──────────────────────────────────────────────────────────────
+  { bool cp = true;
+    for (int t = 0; t < N; t++) {
+      uint64_t key64 = rkey64();
+      uint8_t key256[32] = {0};
+      for (int i = 0; i < 8; i++) key256[i] = (uint8_t)((key64 >> (8*i)) & 0xFF);
+      uint8_t ct1[16] = {0}, ct2[16] = {0};
+      ChaCha20::process(pt16, ct1, 16, key256, 1, nonce12);
+      ChaCha20::process(pt16b, ct2, 16, key256, 1, nonce12);
+      auto r = brute_force_cpu_chacha20(pt16, ct1, nonce12, 16, key64 >> verify_bits, verify_bits, 1);
+      bool ok2 = false;
+      if (r.found) {
+        uint8_t k2[32] = {0};
+        for (int i = 0; i < 8; i++) k2[i] = (uint8_t)((r.found_key >> (8*i)) & 0xFF);
+        uint8_t out[16]; ChaCha20::process(pt16b, out, 16, k2, 1, nonce12);
+        ok2 = (memcmp(out, ct2, 16) == 0);
+      }
+      record("ChaCha20 #" + std::to_string(t), r.found, r.found_key, key64, ok2);
+      cp &= (r.found && r.found_key == key64 && ok2);
+    }
+    std::cout << "ChaCha20             " << (cp ? "PASS" : "FAIL") << "\n";
+  }
+
+  // ── TinyJAMBU-128 ─────────────────────────────────────────────────────────
+  { bool cp = true;
+    for (int t = 0; t < N; t++) {
+      uint64_t key64 = rkey64();
+      uint8_t key16[16] = {0};
+      for (int i = 0; i < 8; i++) key16[i] = (uint8_t)((key64 >> (8*i)) & 0xFF);
+      uint8_t ct1[16]={0}, tag1[8]={0}, ct2[16]={0}, tag2[8]={0};
+      TinyJAMBU128::encrypt(pt16, ct1, 16, tag1, key16, nonce12, ad8, 8);
+      TinyJAMBU128::encrypt(pt16b, ct2, 16, tag2, key16, nonce12, ad8, 8);
+      auto r = brute_force_cpu_tinyjambu(pt16, ct1, nonce12, 16, tag1, ad8, 8, key64>>verify_bits, verify_bits, 1);
+      bool ok2 = false;
+      if (r.found) {
+        uint8_t k2[16]={0};
+        for (int i = 0; i < 8; i++) k2[i] = (uint8_t)((r.found_key >> (8*i)) & 0xFF);
+        uint8_t oc[16]={0}, ot[8]={0};
+        TinyJAMBU128::encrypt(pt16b, oc, 16, ot, k2, nonce12, ad8, 8);
+        ok2 = (memcmp(oc, ct2, 16)==0 && memcmp(ot, tag2, 8)==0);
+      }
+      record("TinyJAMBU-128 #" + std::to_string(t), r.found, r.found_key, key64, ok2);
+      cp &= (r.found && r.found_key == key64 && ok2);
+    }
+    std::cout << "TinyJAMBU-128        " << (cp ? "PASS" : "FAIL") << "\n";
+  }
+
+  // ── ZUC-128 ───────────────────────────────────────────────────────────────
+  { bool cp = true;
+    for (int t = 0; t < N; t++) {
+      uint64_t key64 = rkey64();
+      uint8_t key16[16] = {0};
+      for (int i = 0; i < 8; i++) key16[i] = (uint8_t)((key64 >> (8*i)) & 0xFF);
+      uint8_t ct1[16]={0}, ct2[16]={0};
+      ZUC::process(pt16, ct1, 16, key16, iv16);
+      ZUC::process(pt16b, ct2, 16, key16, iv16);
+      auto r = brute_force_cpu_zuc(pt16, ct1, iv16, 16, key64>>verify_bits, verify_bits, 1);
+      bool ok2 = false;
+      if (r.found) {
+        uint8_t k2[16]={0};
+        for (int i = 0; i < 8; i++) k2[i] = (uint8_t)((r.found_key >> (8*i)) & 0xFF);
+        uint8_t out[16]; ZUC::process(pt16b, out, 16, k2, iv16);
+        ok2 = (memcmp(out, ct2, 16)==0);
+      }
+      record("ZUC-128 #" + std::to_string(t), r.found, r.found_key, key64, ok2);
+      cp &= (r.found && r.found_key == key64 && ok2);
+    }
+    std::cout << "ZUC-128              " << (cp ? "PASS" : "FAIL") << "\n";
+  }
+
+  // ── SNOW-V ────────────────────────────────────────────────────────────────
+  { bool cp = true;
+    for (int t = 0; t < N; t++) {
+      uint64_t key64 = rkey64();
+      uint8_t key32[32] = {0};
+      for (int i = 0; i < 8; i++) key32[i] = (uint8_t)((key64 >> (8*i)) & 0xFF);
+      uint8_t ct1[16]={0}, ct2[16]={0};
+      SNOW_V::process<true>(pt16, ct1, 16, key32, iv16);
+      SNOW_V::process<true>(pt16b, ct2, 16, key32, iv16);
+      auto r = brute_force_cpu_snow_v(pt16, ct1, iv16, 16, key64>>verify_bits, verify_bits, 1);
+      bool ok2 = false;
+      if (r.found) {
+        uint8_t k2[32]={0};
+        for (int i = 0; i < 8; i++) k2[i] = (uint8_t)((r.found_key >> (8*i)) & 0xFF);
+        uint8_t out[16]; SNOW_V::process<true>(pt16b, out, 16, k2, iv16);
+        ok2 = (memcmp(out, ct2, 16)==0);
+      }
+      record("SNOW-V #" + std::to_string(t), r.found, r.found_key, key64, ok2);
+      cp &= (r.found && r.found_key == key64 && ok2);
+    }
+    std::cout << "SNOW-V               " << (cp ? "PASS" : "FAIL") << "\n";
+  }
+
+  // ── AES-128 ───────────────────────────────────────────────────────────────
+  { bool cp = true;
+    for (int t = 0; t < N; t++) {
+      uint64_t key64 = rkey64();
+      uint8_t key16[16] = {0};
+      for (int i = 0; i < 8; i++) key16[i] = (uint8_t)((key64 >> (8*i)) & 0xFF);
+      uint8_t ct1[16]={0}, ct2[16]={0};
+      AES128::encrypt<true>(pt16, key16, ct1);
+      AES128::encrypt<true>(pt16b, key16, ct2);
+      auto r = brute_force_cpu_aes(pt16, ct1, key64>>verify_bits, verify_bits, 1);
+      bool ok2 = false;
+      if (r.found) {
+        uint8_t k2[16]={0};
+        for (int i = 0; i < 8; i++) k2[i] = (uint8_t)((r.found_key >> (8*i)) & 0xFF);
+        uint8_t out[16]; AES128::encrypt<true>(pt16b, k2, out);
+        ok2 = (memcmp(out, ct2, 16)==0);
+      }
+      record("AES-128 #" + std::to_string(t), r.found, r.found_key, key64, ok2);
+      cp &= (r.found && r.found_key == key64 && ok2);
+    }
+    std::cout << "AES-128              " << (cp ? "PASS" : "FAIL") << "\n";
+  }
+
+  // ── Salsa20 ───────────────────────────────────────────────────────────────
+  { bool cp = true;
+    for (int t = 0; t < N; t++) {
+      uint64_t key64 = rkey64();
+      uint8_t key256[32]={0};
+      for (int i = 0; i < 8; i++) key256[i] = (uint8_t)((key64 >> (8*i)) & 0xFF);
+      uint8_t ct1[16]={0}, ct2[16]={0};
+      Salsa20::process(pt16, ct1, 16, key256, iv8);
+      Salsa20::process(pt16b, ct2, 16, key256, iv8);
+      auto r = brute_force_cpu_salsa20(pt16, ct1, iv8, 16, key64>>verify_bits, verify_bits, 1);
+      bool ok2 = false;
+      if (r.found) {
+        uint8_t k2[32]={0};
+        for (int i = 0; i < 8; i++) k2[i] = (uint8_t)((r.found_key >> (8*i)) & 0xFF);
+        uint8_t out[16]; Salsa20::process(pt16b, out, 16, k2, iv8);
+        ok2 = (memcmp(out, ct2, 16)==0);
+      }
+      record("Salsa20 #" + std::to_string(t), r.found, r.found_key, key64, ok2);
+      cp &= (r.found && r.found_key == key64 && ok2);
+    }
+    std::cout << "Salsa20              " << (cp ? "PASS" : "FAIL") << "\n";
+  }
+
+  // ── Grain-128AEADv2 ───────────────────────────────────────────────────────
+  { bool cp = true;
+    for (int t = 0; t < N; t++) {
+      uint64_t key64 = rkey64();
+      uint8_t key16[16]={0};
+      for (int i = 0; i < 8; i++) key16[i] = (uint8_t)((key64 >> (8*i)) & 0xFF);
+      uint8_t ct1[16]={0}, tag1[8]={0}, ct2[16]={0}, tag2[8]={0};
+      Grain128AEADv2::process(pt16, ct1, 16, ad8, 8, tag1, key16, nonce12);
+      Grain128AEADv2::process(pt16b, ct2, 16, ad8, 8, tag2, key16, nonce12);
+      uint8_t tgt[16]; for(int i=0;i<16;i++) tgt[i]=pt16[i]^ct1[i];
+      auto r = brute_force_cpu_grain128aeadv2(pt16, ct1, nonce12, 16, ad8, 8, key64>>verify_bits, verify_bits, 1);
+      bool ok2 = false;
+      if (r.found) {
+        uint8_t k2[16]={0};
+        for (int i = 0; i < 8; i++) k2[i] = (uint8_t)((r.found_key >> (8*i)) & 0xFF);
+        uint8_t oc[16]={0}, ot[8]={0};
+        Grain128AEADv2::process(pt16b, oc, 16, ad8, 8, ot, k2, nonce12);
+        ok2 = (memcmp(oc, ct2, 16)==0 && memcmp(ot, tag2, 8)==0);
+      }
+      record("Grain128AEADv2 #" + std::to_string(t), r.found, r.found_key, key64, ok2);
+      cp &= (r.found && r.found_key == key64 && ok2);
+    }
+    std::cout << "Grain-128AEADv2      " << (cp ? "PASS" : "FAIL") << "\n";
+  }
+
+  // ── Summary ───────────────────────────────────────────────────────────────
+  std::cout << "\nResults: " << (total - fail_count) << "/" << total << " passed";
+  if (fail_count == 0) {
+    std::cout << " — no failure cases detected.\n";
+  } else {
+    std::cout << " — " << fail_count << " FAILURE(S):\n";
+    for (auto& f : failures) std::cout << f << "\n";
+  }
+  return (fail_count == 0);
+}
+
+// ============================================================
 // CLI Args
 // ============================================================
 
@@ -883,6 +1223,8 @@ struct Args {
   int blocks = 1024;
   int threads = 256;
   bool test_only = false;
+  bool verify_only = false;
+  int  verify_bits = 1;   // unknown_bits used in --verify mode
   bool cpu_only = false;
   bool gpu_only = false;
   bool run_cpu = true;
@@ -911,20 +1253,27 @@ static Args parse_args(int argc, char** argv) {
     else if (s == "--gpu_repeats") a.gpu_repeats = std::stoi(need("--gpu_repeats"));
     else if (s == "--blocks") a.blocks = std::stoi(need("--blocks"));
     else if (s == "--threads") a.threads = std::stoi(need("--threads"));
-    else if (s == "--test") a.test_only = true;
+    else if (s == "--test")        a.test_only   = true;
+    else if (s == "--verify")      a.verify_only = true;
+    else if (s == "--verify_bits") a.verify_bits = std::stoi(need("--verify_bits"));
     else if (s == "--cpu_only") { a.run_cpu = true; a.run_gpu = false; a.cpu_only = true; }
     else if (s == "--gpu_only") { a.run_cpu = false; a.run_gpu = true; a.gpu_only = true; }
     else if (s == "--help" || s == "-h") {
       std::cout
         << "Usage: bench [options]\n"
-        << "  --cipher <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|aes|salsa|grain128|all> (default: all)\n"
-        << "  --variants <baseline|optimized|optimized_ilp|shared|all|auto> (default: auto)\n"
+        << "  --cipher <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|aes|salsa|grain128|all>\n"
+        << "           (default: all)\n"
+        << "  --variants <baseline|optimized|optimized_ilp|shared|bitsliced|all|auto>\n"
+        << "             (default: auto — best variants per cipher)\n"
+        << "             bitsliced is only supported for tinyjambu and grain128\n"
         << "  --out results.csv\n"
         << "  --min_bits 1 --max_bits 30 --step_bits 1\n"
         << "  --cpu_repeats 3 --gpu_repeats 10\n"
         << "  --blocks 1024 --threads 256\n"
         << "  --cpu_only | --gpu_only (default: run both)\n"
-        << "  --test (run self-tests only)\n";
+        << "  --test              (run fixed self-tests only)\n"
+        << "  --verify            (run randomized correctness verification)\n"
+        << "  --verify_bits <N>   unknown bits for --verify mode (default: 1)\n";
       std::exit(0);
     }
   }
@@ -933,21 +1282,30 @@ static Args parse_args(int argc, char** argv) {
 
 
 static inline std::vector<GpuVariant> selected_gpu_variants(const Args& a, CipherType cipher) {
-  if (a.variants == "baseline") return {GpuVariant::BASELINE};
-  if (a.variants == "optimized") return {GpuVariant::OPTIMIZED};
+  const bool is_aead = (cipher == CipherType::TINYJAMBU_128 || cipher == CipherType::GRAIN128_AEADV2);
+
+  if (a.variants == "baseline")      return {GpuVariant::BASELINE};
+  if (a.variants == "optimized")     return {GpuVariant::OPTIMIZED};
   if (a.variants == "optimized_ilp") return {GpuVariant::OPTIMIZED_ILP};
-  if (a.variants == "shared") return {GpuVariant::OPTIMIZED_SHARED};
-  if (a.variants == "all") return {GpuVariant::BASELINE, GpuVariant::OPTIMIZED, GpuVariant::OPTIMIZED_ILP, GpuVariant::OPTIMIZED_SHARED};
+  if (a.variants == "shared")        return {GpuVariant::OPTIMIZED_SHARED};
+  if (a.variants == "bitsliced") {
+    // Only AEAD ciphers have a bitsliced kernel; others fall back to baseline
+    return is_aead ? std::vector<GpuVariant>{GpuVariant::BITSLICED}
+                   : std::vector<GpuVariant>{GpuVariant::BASELINE};
+  }
+  if (a.variants == "all") {
+    if (is_aead)
+      return {GpuVariant::BASELINE, GpuVariant::OPTIMIZED_ILP, GpuVariant::BITSLICED};
+    if (cipher == CipherType::PRESENT80)
+      return {GpuVariant::BASELINE, GpuVariant::OPTIMIZED, GpuVariant::OPTIMIZED_ILP, GpuVariant::OPTIMIZED_SHARED};
+    return {GpuVariant::BASELINE, GpuVariant::OPTIMIZED, GpuVariant::OPTIMIZED_ILP};
+  }
 
-  // AEAD ciphers use BASELINE + ILP + BITSLICED (no simple keystream early-reject)
-  if (cipher == CipherType::TINYJAMBU_128 || cipher == CipherType::GRAIN128_AEADV2)
+  // auto mode — pick the most relevant set per cipher
+  if (is_aead)
     return {GpuVariant::BASELINE, GpuVariant::OPTIMIZED_ILP, GpuVariant::BITSLICED};
-
-  // PRESENT supports shared-memory table variant
   if (cipher == CipherType::PRESENT80)
     return {GpuVariant::BASELINE, GpuVariant::OPTIMIZED, GpuVariant::OPTIMIZED_ILP, GpuVariant::OPTIMIZED_SHARED};
-
-  // Default: BASELINE + OPTIMIZED (early-exit keystream) + OPTIMIZED_ILP
   return {GpuVariant::BASELINE, GpuVariant::OPTIMIZED, GpuVariant::OPTIMIZED_ILP};
 }
 
@@ -1434,6 +1792,11 @@ int main(int argc, char** argv) {
 
   if (a.test_only) {
     bool ok = run_all_self_tests();
+    return ok ? 0 : 1;
+  }
+
+  if (a.verify_only) {
+    bool ok = run_random_key_verification(a.verify_bits);
     return ok ? 0 : 1;
   }
 
