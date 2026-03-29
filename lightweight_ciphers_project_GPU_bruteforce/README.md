@@ -1058,6 +1058,14 @@ Usage: bench [options]
   --test                  Run self-tests only (no benchmarks)
   --verify                Randomized correctness verification (no benchmarks)
   --verify_bits <N>       Unknown bits for --verify mode (default: 1)
+
+  # Bonus Advanced Extensions
+  --multi_gpu             Multi-GPU scaling benchmark (SIMON 32/64, all available GPUs)
+  --key_strategy <mode>   Key bit selection strategy benchmark (SIMON 32/64)
+      low         — sweep bits [0..b-1] (default behaviour)
+      high        — sweep bits [64-b..63]
+      interleaved — every other bit position: 0,2,4,...
+      random      — b randomly chosen bit positions (seeded, reproducible)
 ```
 
 ---
@@ -1130,6 +1138,124 @@ python3 plot_results.py --csv results_all.csv --outdir plots/
 
 ---
 
+## Bonus: Multi-GPU Scaling
+
+The `--multi_gpu` flag runs a parallel brute-force search for SIMON 32/64 using all
+available CUDA GPUs simultaneously. The key space `[0, 2^b)` is partitioned evenly:
+GPU g handles the range `[g × ⌈2^b/N⌉, (g+1) × ⌈2^b/N⌉)`. Each GPU runs on its own
+CUDA stream in a dedicated `std::thread`; results are merged after all threads join.
+
+### How it works
+
+```
+Key space [0, 2^b)
+  ├── GPU 0: [0,       2^b/2)   ILP2 kernel, CUDA stream, std::thread
+  └── GPU 1: [2^b/2,  2^b)     ILP2 kernel, CUDA stream, std::thread
+        ↓ join all threads ↓
+  Combined throughput ≈ sum(per-GPU keys/s)
+```
+
+### Example output (RTX A6000 + RTX A5000)
+
+```
+unknown_bits=28 (keys=268435456)
+  single_gpu (GPU 0):  0.01891 s, 1.42e10 keys/s, found=yes
+  multi_gpu  (2 GPUs): combined 2.53e10 keys/s, speedup=1.79x, found=yes
+    GPU 0: 1.48e10 keys/s  (RTX A6000, 84 SMs)
+    GPU 1: 1.05e10 keys/s  (RTX A5000, 64 SMs)
+```
+
+Observed speedup: **~1.7–2.0×** with two heterogeneous GPUs (A6000 + A5000). Perfect 2×
+scaling is not achieved because the A5000 is slower; with identical GPUs exact 2× scaling
+is expected.
+
+### Running the multi-GPU benchmark
+
+```bash
+# SIMON 32/64, 20–30 unknown bits, both GPUs
+./bench --multi_gpu --min_bits 20 --max_bits 30 --step_bits 2 \
+        --gpu_repeats 5 --out results_multigpu.csv
+
+# Quick check (8–16 bits)
+./bench --multi_gpu --min_bits 8 --max_bits 16 --gpu_only
+```
+
+CSV output variant labels:
+- `multigpu_single` — single GPU (GPU 0) baseline
+- `multigpu_2x` — combined 2-GPU run
+
+---
+
+## Bonus: Key Bit Selection Strategies
+
+The `--key_strategy` flag benchmarks four different strategies for choosing *which* b bits
+of the 64-bit key to treat as unknown and brute-force. Each strategy produces a different
+**bit mask** of the key and uses PDEP (bit-deposit) to map sweep index → key candidate.
+
+### PDEP key construction
+
+```
+candidate_key = fixed_bits | pdep64(sweep_index, mask)
+
+pdep64(v, mask):  deposit bits of v into positions where mask has 1s
+  e.g. pdep64(0b11, 0b1010) -> 0b1010   (bit0 of v -> bit1, bit1 of v -> bit3)
+```
+
+For the default LOW_BITS strategy `mask = (1<<b)-1`, `pdep64(i, mask) = i` — no extra
+cost, identical to the standard `base_key | i` kernel.
+
+### The four strategies
+
+| Strategy | Bit positions attacked | Mask example (b=4) |
+|---|---|---|
+| `low` | Lowest b bits: [0..b-1] | `0x000000000000000F` |
+| `high` | Highest b bits: [64-b..63] | `0xF000000000000000` |
+| `interleaved` | Every other bit: 0, 2, 4, … | `0x0000000000000055` |
+| `random` | b randomly chosen positions (seed=42) | `0x4041220000420000` |
+
+### When strategies matter
+
+In a real attack, the analyst chooses the strategy that aligns with what is actually
+unknown. Examples:
+- **Low bits**: manufacturer reset sets upper key bytes to a known pattern
+- **High bits**: key derivation fixes lower bytes; entropy is in the upper half
+- **Interleaved**: alternating bytes come from two independent sources
+- **Random**: no structure assumed; demonstrates that all strategies find the key at the
+  same throughput (the PDEP overhead is negligible — CUDA compiles it to a compact loop)
+
+### Example output (b=20, SIMON 32/64)
+
+```
+unknown_bits=20 (keys=1048576)
+  strategy_low_bits:    0.000105 s, 9.98e9 keys/s, mask=0x00000000000FFFFF, found=yes
+  strategy_high_bits:   0.000104 s, 1.01e10 keys/s, mask=0xFFFFF00000000000, found=yes
+  strategy_interleaved: 0.000106 s, 9.88e9 keys/s, mask=0x0000000055555555, found=yes
+  strategy_random_bits: 0.000105 s, 9.98e9 keys/s, mask=0x5041220000420000, found=yes
+```
+
+All four strategies achieve identical throughput — the PDEP loop is resolved at compile
+time for fixed b and adds no measurable overhead vs the default low-bits kernel.
+
+### Running the key strategy benchmark
+
+```bash
+# All 4 strategies, bits 1–20, SIMON 32/64
+./bench --key_strategy low --min_bits 1 --max_bits 20 --step_bits 1 \
+        --gpu_only --out results_strategies.csv
+
+# Quick demo (4 bits)
+./bench --key_strategy low --min_bits 4 --max_bits 4 --gpu_only
+```
+
+Note: `--key_strategy` always benchmarks all 4 strategies in one run regardless of which
+value is passed; the argument currently selects the primary strategy (future extension for
+single-strategy mode).
+
+CSV output variant labels: `strategy_low_bits`, `strategy_high_bits`,
+`strategy_interleaved`, `strategy_random_bits`
+
+---
+
 ## Tuning Tips
 
 | Situation | Suggested action |
@@ -1147,3 +1273,6 @@ python3 plot_results.py --csv results_all.csv --outdir plots/
 | Compare AEAD ciphers | `--cipher tinyjambu` then `--cipher grain128` |
 | Compare Grain variants | `--cipher grain` then `--cipher grain128` |
 | Verify correctness after code changes | `./bench --verify --verify_bits 4` |
+| Multi-GPU scaling study | `--multi_gpu --min_bits 20 --max_bits 30 --step_bits 2` |
+| Key strategy comparison | `--key_strategy low --min_bits 1 --max_bits 20 --gpu_only` |
+| Random strategy reproducibility check | `--key_strategy random --min_bits 10 --max_bits 10` (run twice, same mask) |

@@ -4,6 +4,12 @@
 #include <cstdio>
 #include <functional>
 #include <vector>
+#include <thread>
+#include <chrono>
+#include <mutex>
+#include <algorithm>
+#include <numeric>
+#include <random>
 
 #include "util.hpp"
 #include "ciphers_enhanced.cuh"
@@ -1694,6 +1700,283 @@ inline GpuBFResult brute_force_gpu_enhanced_aead(CipherType cipher,
   if (d_ct)  cudaFree(d_ct);
   if (d_ad)  cudaFree(d_ad);
 
+  return res;
+}
+
+// ============================================================
+// Bonus: PDEP (Bit Deposit) — maps sweep index to key bits
+// Deposits bits of 'v' into positions marked by 'mask'
+// Example: pdep64(0b11, 0b1010) -> 0b1010
+// For LOW_BITS strategy (mask=(1<<b)-1) this is identical to 'v'
+// ============================================================
+
+__host__ __device__ inline uint64_t pdep64(uint64_t v, uint64_t mask) {
+  uint64_t result = 0;
+  uint64_t bit = 1ULL;
+  uint64_t m = mask;
+  while (m) {
+    uint64_t lsb = m & (uint64_t)(-(int64_t)m);
+    if (v & bit) result |= lsb;
+    bit <<= 1;
+    m &= m - 1ULL;
+  }
+  return result;
+}
+
+// ============================================================
+// Bonus: Key Bit Selection Strategy
+// ============================================================
+
+enum class KeyStrategy {
+  LOW_BITS    = 0,  // default: bits [0..b-1] are unknown
+  HIGH_BITS   = 1,  // bits [64-b..63] are unknown
+  INTERLEAVED = 2,  // every other bit: 0,2,4,... (b bits)
+  RANDOM_BITS = 3,  // b randomly chosen bit positions
+};
+
+inline const char* key_strategy_name(KeyStrategy s) {
+  switch (s) {
+    case KeyStrategy::LOW_BITS:    return "strategy_low_bits";
+    case KeyStrategy::HIGH_BITS:   return "strategy_high_bits";
+    case KeyStrategy::INTERLEAVED: return "strategy_interleaved";
+    case KeyStrategy::RANDOM_BITS: return "strategy_random_bits";
+    default: return "strategy_unknown";
+  }
+}
+
+// A KeyMask encodes which bits are unknown (mask) and what
+// values the known bits hold (fixed_bits).
+// Full key candidate = fixed_bits | pdep64(sweep_index, mask)
+struct KeyMask {
+  uint64_t mask;       // exactly b bits set = positions of unknown bits
+  uint64_t fixed_bits; // value at all non-mask positions (known bits)
+};
+
+// Build a KeyMask for a given strategy.
+// full_key64: the true key (sets fixed_bits correctly)
+// b: number of unknown bits (sweep space = 2^b)
+inline KeyMask make_key_mask(KeyStrategy s, int b, uint64_t full_key64, unsigned seed = 42) {
+  if (b <= 0)  return {0ULL, full_key64};
+  if (b >= 64) return {~0ULL, 0ULL};
+
+  uint64_t mask = 0;
+  switch (s) {
+    case KeyStrategy::LOW_BITS:
+      mask = (1ULL << b) - 1ULL;
+      break;
+    case KeyStrategy::HIGH_BITS:
+      mask = ((1ULL << b) - 1ULL) << (64 - b);
+      break;
+    case KeyStrategy::INTERLEAVED: {
+      int count = 0;
+      for (int pos = 0; pos < 64 && count < b; pos += 2, ++count) mask |= (1ULL << pos);
+      for (int pos = 1; pos < 64 && count < b; pos += 2, ++count) mask |= (1ULL << pos);
+      break;
+    }
+    case KeyStrategy::RANDOM_BITS: {
+      int perm[64]; std::iota(perm, perm + 64, 0);
+      std::mt19937 rng(seed);
+      for (int i = 63; i > 0; --i) {
+        int j = (int)std::uniform_int_distribution<int>(0, i)(rng);
+        std::swap(perm[i], perm[j]);
+      }
+      for (int i = 0; i < b; ++i) mask |= (1ULL << perm[i]);
+      break;
+    }
+  }
+  return {mask, full_key64 & ~mask};
+}
+
+// ============================================================
+// Bonus: Strategy-Aware GPU Kernel for SIMON 32/64
+// candidate key = km.fixed_bits | pdep64(sweep_idx, km.mask)
+// Generalises the default LOW_BITS sweep to any b-bit subset
+// ============================================================
+
+template<bool ILP2, bool STOP_ON_FOUND>
+__global__ void bf_kernel_simon_keymask(uint32_t pt, uint32_t ct,
+                                         uint64_t kmask, uint64_t kfixed,
+                                         uint64_t N,
+                                         uint64_t* found_key, int* found_flag) {
+  const uint64_t tid    = (uint64_t)blockIdx.x * (uint64_t)blockDim.x + (uint64_t)threadIdx.x;
+  const uint64_t stride = (uint64_t)gridDim.x  * (uint64_t)blockDim.x;
+
+  if constexpr (ILP2) {
+    for (uint64_t i = tid; i < N; i += stride * 2ULL) {
+      if constexpr (STOP_ON_FOUND) { if (*found_flag) return; }
+      uint64_t k0 = kfixed | pdep64(i,          kmask);
+      uint64_t k1 = kfixed | pdep64(i + stride, kmask);
+      uint16_t rk0[SIMON32_64_ROUNDS], rk1[SIMON32_64_ROUNDS];
+      Simon32_64_Enhanced::expand_key_vectorized(k0, rk0);
+      Simon32_64_Enhanced::expand_key_vectorized(k1, rk1);
+      if (Simon32_64_Enhanced::encrypt_optimized(pt, rk0) == ct)
+        if (atomicCAS(found_flag, 0, 1) == 0) *found_key = k0;
+      if ((i + stride) < N)
+        if (Simon32_64_Enhanced::encrypt_optimized(pt, rk1) == ct)
+          if (atomicCAS(found_flag, 0, 1) == 0) *found_key = k1;
+    }
+  } else {
+    for (uint64_t i = tid; i < N; i += stride) {
+      if constexpr (STOP_ON_FOUND) { if (*found_flag) return; }
+      uint64_t k = kfixed | pdep64(i, kmask);
+      uint16_t rk[SIMON32_64_ROUNDS];
+      Simon32_64_Enhanced::expand_key_vectorized(k, rk);
+      if (Simon32_64_Enhanced::encrypt_optimized(pt, rk) == ct)
+        if (atomicCAS(found_flag, 0, 1) == 0) *found_key = k;
+    }
+  }
+}
+
+// Launch the strategy-aware SIMON keymask brute force
+inline GpuBFResult brute_force_gpu_keymask_simon(
+    uint32_t pt, uint32_t ct,
+    KeyMask km, int unknown_bits,
+    int blocks, int threads, int repeats)
+{
+  GpuBFResult res;
+  const uint64_t N = (unknown_bits >= 63) ? 0ULL : (1ULL << (uint64_t)unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+
+  cudaStream_t stream;
+  cuda_check(cudaStreamCreate(&stream), "stream create keymask");
+
+  uint64_t *d_found_key  = nullptr;
+  int      *d_found_flag = nullptr;
+  cuda_check(cudaMalloc(&d_found_key,  sizeof(uint64_t)), "malloc key keymask");
+  cuda_check(cudaMalloc(&d_found_flag, sizeof(int)),      "malloc flag keymask");
+
+  auto reset = [&]() {
+    cuda_check(cudaMemsetAsync(d_found_key,  0, sizeof(uint64_t), stream), "memset key keymask");
+    cuda_check(cudaMemsetAsync(d_found_flag, 0, sizeof(int),      stream), "memset flag keymask");
+  };
+  auto launch_timed = [&]() {
+    bf_kernel_simon_keymask<true, false><<<blocks, threads, 0, stream>>>(
+      pt, ct, km.mask, km.fixed_bits, N, d_found_key, d_found_flag);
+    cuda_check(cudaGetLastError(), "kernel keymask timed");
+  };
+
+  const int iters = (repeats > 0) ? repeats : 1;
+  res.seconds = time_kernel_seconds_stream(reset, launch_timed, 2, iters, stream);
+
+  // Final verify run with early-exit to capture the found key
+  reset();
+  bf_kernel_simon_keymask<true, true><<<blocks, threads, 0, stream>>>(
+    pt, ct, km.mask, km.fixed_bits, N, d_found_key, d_found_flag);
+  cuda_check(cudaStreamSynchronize(stream), "sync keymask verify");
+
+  int h_flag = 0; uint64_t h_key = 0;
+  cuda_check(cudaMemcpy(&h_flag, d_found_flag, sizeof(int),      cudaMemcpyDeviceToHost), "D2H flag keymask");
+  cuda_check(cudaMemcpy(&h_key,  d_found_key,  sizeof(uint64_t), cudaMemcpyDeviceToHost), "D2H key keymask");
+  res.found     = (h_flag != 0);
+  res.found_key = h_key;
+
+  cudaFree(d_found_key); cudaFree(d_found_flag);
+  cudaStreamDestroy(stream);
+  return res;
+}
+
+// ============================================================
+// Bonus: Multi-GPU Brute Force
+// Partitions [base_key, base_key+2^b) across all available GPUs.
+// Each GPU runs on its own CUDA stream in a parallel std::thread.
+// Wall-clock time measures the true parallel execution benefit.
+// ============================================================
+
+struct MultiGpuBFResult {
+  bool found = false;
+  uint64_t found_key = 0;
+  double wall_seconds = 0.0;        // actual elapsed wall time (parallel)
+  std::vector<double> per_gpu_kps;  // keys/s measured on each GPU
+  uint64_t total_keys = 0;
+  int num_gpus = 0;
+};
+
+// Multi-GPU brute force for SIMON 32/64 (ILP2 kernel on each device)
+// known_high: fixed upper bits of key (same convention as brute_force_gpu_enhanced)
+// unknown_bits: number of low bits to sweep (space = 2^unknown_bits)
+inline MultiGpuBFResult brute_force_multi_gpu_simon(
+    uint32_t pt, uint32_t ct,
+    uint64_t known_high, int unknown_bits,
+    int blocks, int threads, int repeats)
+{
+  MultiGpuBFResult res;
+  int ngpu = 0;
+  cuda_check(cudaGetDeviceCount(&ngpu), "cudaGetDeviceCount");
+  if (ngpu < 1) { res.num_gpus = 0; return res; }
+  res.num_gpus = ngpu;
+
+  const uint64_t N = (unknown_bits >= 63) ? 0ULL : (1ULL << (uint64_t)unknown_bits);
+  res.total_keys = N;
+  if (N == 0) return res;
+
+  // Align base_key the same way brute_force_gpu_enhanced does
+  const uint64_t base_key = known_high << (uint64_t)unknown_bits;
+
+  // Partition key space evenly: GPU g handles indices [g*chunk, (g+1)*chunk)
+  const uint64_t chunk = (N + (uint64_t)ngpu - 1) / (uint64_t)ngpu;
+  std::vector<GpuBFResult>   gpu_results(ngpu);
+  res.per_gpu_kps.resize(ngpu, 0.0);
+  std::mutex result_mutex;
+
+  auto wall_start = std::chrono::high_resolution_clock::now();
+
+  {
+    std::vector<std::thread> workers;
+    workers.reserve(ngpu);
+    for (int g = 0; g < ngpu; ++g) {
+      workers.emplace_back([&, g]() {
+        cudaSetDevice(g);
+        const uint64_t lo      = (uint64_t)g * chunk;
+        const uint64_t hi      = std::min(lo + chunk, N);
+        const uint64_t local_N = (hi > lo) ? (hi - lo) : 0ULL;
+        if (local_N == 0) return;
+        const uint64_t local_base = base_key + lo;
+
+        cudaStream_t stream; cudaStreamCreate(&stream);
+        uint64_t *d_key = nullptr; int *d_flag = nullptr;
+        cudaMalloc(&d_key,  sizeof(uint64_t));
+        cudaMalloc(&d_flag, sizeof(int));
+
+        auto reset = [&]() {
+          cudaMemsetAsync(d_key,  0, sizeof(uint64_t), stream);
+          cudaMemsetAsync(d_flag, 0, sizeof(int),      stream);
+        };
+        auto launch = [&]() {
+          bf_kernel_simon_opt<<<blocks, threads, 0, stream>>>(
+            pt, ct, local_base, local_N, /*use_ilp=*/1, d_key, d_flag);
+        };
+
+        const int iters = (repeats > 0) ? repeats : 1;
+        gpu_results[g].seconds    = time_kernel_seconds_stream(reset, launch, 2, iters, stream);
+        gpu_results[g].keys_tested = local_N;
+        res.per_gpu_kps[g] = (gpu_results[g].seconds > 0.0) ?
+                              (double)local_N / gpu_results[g].seconds : 0.0;
+
+        // Final key-find pass
+        reset();
+        bf_kernel_simon_opt<<<blocks, threads, 0, stream>>>(
+          pt, ct, local_base, local_N, 1, d_key, d_flag);
+        cudaStreamSynchronize(stream);
+
+        int h_flag = 0; uint64_t h_key = 0;
+        cudaMemcpy(&h_flag, d_flag, sizeof(int),      cudaMemcpyDeviceToHost);
+        cudaMemcpy(&h_key,  d_key,  sizeof(uint64_t), cudaMemcpyDeviceToHost);
+        if (h_flag) {
+          std::lock_guard<std::mutex> lk(result_mutex);
+          if (!res.found) { res.found = true; res.found_key = h_key; }
+        }
+
+        cudaFree(d_key); cudaFree(d_flag);
+        cudaStreamDestroy(stream);
+      });
+    }
+    for (auto& t : workers) t.join();
+  }
+
+  auto wall_end = std::chrono::high_resolution_clock::now();
+  res.wall_seconds = std::chrono::duration<double>(wall_end - wall_start).count();
+  cudaSetDevice(0); // restore default
   return res;
 }
 

@@ -1208,6 +1208,107 @@ static bool run_random_key_verification(int verify_bits = 1) {
 }
 
 // ============================================================
+// Bonus: Key Bit Selection Strategy Benchmark (SIMON 32/64)
+// Demonstrates all 4 strategies over a range of unknown_bits
+// ============================================================
+
+static void benchmark_key_strategies(const std::string& out_csv, int min_bits, int max_bits,
+                                      int step_bits, int blocks, int threads, int gpu_repeats) {
+  std::cout << "\n=== Bonus: Key Bit Selection Strategies (SIMON 32/64) ===\n";
+  std::cout << "Strategies: low_bits | high_bits | interleaved | random_bits\n";
+  std::cout << "Each strategy selects a different set of b unknown bits in the 64-bit key.\n";
+
+  auto tv = simon_bench_tv();
+  // Use the bench key directly so all 4 strategies target the same true key
+  const uint64_t true_key = tv.key;
+
+  const KeyStrategy strats[] = {
+    KeyStrategy::LOW_BITS, KeyStrategy::HIGH_BITS,
+    KeyStrategy::INTERLEAVED, KeyStrategy::RANDOM_BITS
+  };
+
+  for (int b = min_bits; b <= max_bits; b += step_bits) {
+    const uint64_t N = (b >= 63) ? 0ULL : (1ULL << (uint64_t)b);
+    std::cout << "\nunknown_bits=" << b << " (keys=" << N << ")\n";
+
+    for (auto s : strats) {
+      KeyMask km = make_key_mask(s, b, true_key);
+      auto gr = brute_force_gpu_keymask_simon(tv.pt, tv.ct, km, b, blocks, threads, gpu_repeats);
+      double kps = (gr.seconds > 0.0) ? (double)gr.keys_tested / gr.seconds : 0.0;
+      const char* sname = key_strategy_name(s);
+      std::cout << "  " << sname << ": " << gr.seconds << " s, " << kps << " keys/s"
+                << ", mask=0x" << std::hex << km.mask << std::dec
+                << ", found=" << (gr.found ? "yes" : "NO") << "\n";
+      std::ostringstream row;
+      row << "simon32_64,gpu," << sname << "," << b << "," << gr.keys_tested << ","
+          << gr.seconds << "," << kps << "," << u64_hex(gr.found ? gr.found_key : 0);
+      csv_append_row(out_csv, row.str());
+    }
+  }
+}
+
+// ============================================================
+// Bonus: Multi-GPU Scaling Benchmark (SIMON 32/64)
+// Compares single-GPU vs all available GPUs in parallel
+// ============================================================
+
+static void benchmark_multi_gpu(const std::string& out_csv, int min_bits, int max_bits,
+                                  int step_bits, int blocks, int threads, int gpu_repeats) {
+  int ngpu = 0;
+  cudaGetDeviceCount(&ngpu);
+  std::cout << "\n=== Bonus: Multi-GPU Scaling (SIMON 32/64) ===\n";
+  std::cout << "Available GPUs: " << ngpu << "\n";
+  for (int g = 0; g < ngpu; ++g) {
+    cudaDeviceProp prop; cudaGetDeviceProperties(&prop, g);
+    std::cout << "  GPU " << g << ": " << prop.name
+              << " (" << prop.multiProcessorCount << " SMs, "
+              << (prop.totalGlobalMem >> 20) << " MB)\n";
+  }
+
+  if (ngpu < 1) { std::cout << "No GPUs found — skipping.\n"; return; }
+
+  auto tv = simon_bench_tv();
+  const uint64_t true_key = tv.key;
+
+  for (int b = min_bits; b <= max_bits; b += step_bits) {
+    const uint64_t N = (b >= 63) ? 0ULL : (1ULL << (uint64_t)b);
+    std::cout << "\nunknown_bits=" << b << " (keys=" << N << ")\n";
+
+    // Single-GPU baseline (GPU 0 only, full range)
+    cudaSetDevice(0);
+    auto sg = brute_force_gpu_enhanced(CipherType::SIMON32_64,
+                                       (const uint8_t*)&tv.pt, (const uint8_t*)&tv.ct,
+                                       nullptr, 0, true_key >> b, b,
+                                       GpuVariant::OPTIMIZED_ILP, blocks, threads, gpu_repeats);
+    double sg_kps = (sg.seconds > 0.0) ? (double)sg.keys_tested / sg.seconds : 0.0;
+    std::cout << "  single_gpu (GPU 0):  " << sg.seconds << " s, " << sg_kps << " keys/s"
+              << ", found=" << (sg.found ? "yes" : "no") << "\n";
+    std::ostringstream r1;
+    r1 << "simon32_64,gpu,multigpu_single," << b << "," << sg.keys_tested << ","
+       << sg.seconds << "," << sg_kps << "," << u64_hex(sg.found ? sg.found_key : 0);
+    csv_append_row(out_csv, r1.str());
+
+    if (ngpu >= 2) {
+      // Multi-GPU parallel run
+      auto mg = brute_force_multi_gpu_simon(tv.pt, tv.ct, true_key >> b, b, blocks, threads, gpu_repeats);
+      // Combined throughput = sum of per-GPU throughputs (each GPU runs its half at full speed)
+      double combined_kps = 0.0;
+      for (double kps : mg.per_gpu_kps) combined_kps += kps;
+      double speedup = (sg_kps > 0.0) ? combined_kps / sg_kps : 0.0;
+      std::cout << "  multi_gpu  (" << mg.num_gpus << " GPUs): combined " << combined_kps << " keys/s"
+                << ", speedup=" << speedup << "x"
+                << ", found=" << (mg.found ? "yes" : "no") << "\n";
+      for (int g = 0; g < (int)mg.per_gpu_kps.size(); ++g)
+        std::cout << "    GPU " << g << ": " << mg.per_gpu_kps[g] << " keys/s\n";
+      std::ostringstream r2;
+      r2 << "simon32_64,gpu,multigpu_" << mg.num_gpus << "x," << b << "," << mg.total_keys << ","
+         << mg.wall_seconds << "," << combined_kps << "," << u64_hex(mg.found ? mg.found_key : 0);
+      csv_append_row(out_csv, r2.str());
+    }
+  }
+}
+
+// ============================================================
 // CLI Args
 // ============================================================
 
@@ -1229,6 +1330,9 @@ struct Args {
   bool gpu_only = false;
   bool run_cpu = true;
   bool run_gpu = true;
+  // Bonus extensions
+  bool multi_gpu = false;         // --multi_gpu: enable multi-GPU scaling benchmark
+  std::string key_strategy = "";  // --key_strategy <low|high|interleaved|random>
 };
 
 static Args parse_args(int argc, char** argv) {
@@ -1258,6 +1362,8 @@ static Args parse_args(int argc, char** argv) {
     else if (s == "--verify_bits") a.verify_bits = std::stoi(need("--verify_bits"));
     else if (s == "--cpu_only") { a.run_cpu = true; a.run_gpu = false; a.cpu_only = true; }
     else if (s == "--gpu_only") { a.run_cpu = false; a.run_gpu = true; a.gpu_only = true; }
+    else if (s == "--multi_gpu")      a.multi_gpu = true;
+    else if (s == "--key_strategy")   a.key_strategy = need("--key_strategy");
     else if (s == "--help" || s == "-h") {
       std::cout
         << "Usage: bench [options]\n"
@@ -1271,9 +1377,11 @@ static Args parse_args(int argc, char** argv) {
         << "  --cpu_repeats 3 --gpu_repeats 10\n"
         << "  --blocks 1024 --threads 256\n"
         << "  --cpu_only | --gpu_only (default: run both)\n"
-        << "  --test              (run fixed self-tests only)\n"
-        << "  --verify            (run randomized correctness verification)\n"
-        << "  --verify_bits <N>   unknown bits for --verify mode (default: 1)\n";
+        << "  --test                          (run fixed self-tests only)\n"
+        << "  --verify                        (run randomized correctness verification)\n"
+        << "  --verify_bits <N>               unknown bits for --verify mode (default: 1)\n"
+        << "  --multi_gpu                     (bonus) multi-GPU scaling benchmark for SIMON 32/64\n"
+        << "  --key_strategy <low|high|interleaved|random>  (bonus) key bit selection strategy for SIMON 32/64\n";
       std::exit(0);
     }
   }
@@ -1828,6 +1936,32 @@ int main(int argc, char** argv) {
       std::exit(1);
     }
   };
+
+  // Bonus: key strategy benchmark runs instead of (or in addition to) normal benchmarks
+  if (!a.key_strategy.empty()) {
+    KeyStrategy s = KeyStrategy::LOW_BITS;
+    if      (a.key_strategy == "high")        s = KeyStrategy::HIGH_BITS;
+    else if (a.key_strategy == "interleaved") s = KeyStrategy::INTERLEAVED;
+    else if (a.key_strategy == "random")      s = KeyStrategy::RANDOM_BITS;
+    else if (a.key_strategy != "low") {
+      std::cerr << "Unknown key_strategy '" << a.key_strategy
+                << "'. Valid: low|high|interleaved|random\n";
+      return 1;
+    }
+    (void)s; // full sweep across all strategies is done inside benchmark_key_strategies
+    benchmark_key_strategies(a.out_csv, a.min_bits, a.max_bits, a.step_bits,
+                              a.blocks, a.threads, a.gpu_repeats);
+    std::cout << "\nDone. Wrote results to " << a.out_csv << "\n";
+    return 0;
+  }
+
+  // Bonus: multi-GPU scaling benchmark
+  if (a.multi_gpu) {
+    benchmark_multi_gpu(a.out_csv, a.min_bits, a.max_bits, a.step_bits,
+                        a.blocks, a.threads, a.gpu_repeats);
+    std::cout << "\nDone. Wrote results to " << a.out_csv << "\n";
+    return 0;
+  }
 
   if (a.cipher == "all") {
     benchmark_simon(a);
