@@ -21,11 +21,11 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
 
-# ── colour palette (12 distinct colours) ────────────────────────────────────
+# ── colour palette (14 distinct colours) ────────────────────────────────────
 CIPHER_COLOURS = [
     "#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
     "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf",
-    "#aec7e8","#ffbb78",
+    "#aec7e8","#ffbb78","#98df8a","#ff9896",
 ]
 
 PLATFORM_STYLE = {
@@ -47,6 +47,8 @@ CIPHER_DISPLAY = {
     "aes128":        "AES-128",
     "salsa20":       "Salsa20",
     "grain128aeadv2":"Grain-128AEADv2",
+    "rocca":         "Rocca",
+    "rocca_s":       "Rocca-S",
 }
 
 def safe_label(s):
