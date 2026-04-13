@@ -2115,6 +2115,283 @@ struct Grain128AEADv2 {
 };
 
 // ============================================================
+// Rocca - AES-based AEAD for 5G/6G
+// Paper: "Rocca: An Efficient AES-based Encryption Scheme for Beyond 5G"
+//   ePrint 2022/116. Key: K0||K1 (each 128-bit), Nonce: 128-bit, Tag: 128-bit.
+//   State: 8 × 128-bit words. AES(X,Y)=MixCols∘ShiftRows∘SubBytes(X)⊕Y.
+//   Z0 = 428a2f98d728ae227137449123ef65cd (LE bytes shown in code below)
+//   Z1 = b5c0fbcfec4d3b2fe9b5dba58189dbbc
+// ============================================================
+struct Rocca {
+    __host__ __device__ static inline void xor128(uint8_t r[16], const uint8_t a[16], const uint8_t b[16]) {
+        #pragma unroll
+        for (int i = 0; i < 16; i++) r[i] = a[i] ^ b[i];
+    }
+    __host__ __device__ static inline void copy128(uint8_t d[16], const uint8_t s[16]) {
+        #pragma unroll
+        for (int i = 0; i < 16; i++) d[i] = s[i];
+    }
+    __host__ __device__ static inline void zero128(uint8_t r[16]) {
+        #pragma unroll
+        for (int i = 0; i < 16; i++) r[i] = 0;
+    }
+    // AES(X,Y) = MixColumns(ShiftRows(SubBytes(X))) XOR Y  (one aesenc round)
+    __host__ __device__ static inline void aes_enc(uint8_t out[16], const uint8_t x[16], const uint8_t y[16]) {
+        uint8_t t[16]; copy128(t, x);
+        AES128::subbytes(t); AES128::shiftrows(t); AES128::mixcolumns_fast(t);
+        xor128(out, t, y);
+    }
+    // Round update R(S, X0, X1):
+    //   new[0]=S[7]^X0  new[1]=AES(S[0],S[7])  new[2]=S[1]^S[6]  new[3]=AES(S[2],S[1])
+    //   new[4]=S[3]^X1  new[5]=AES(S[4],S[3])  new[6]=AES(S[5],S[4])  new[7]=S[0]^S[6]
+    __host__ __device__ static inline void round_update(uint8_t S[8][16], const uint8_t X0[16], const uint8_t X1[16]) {
+        uint8_t T[8][16];
+        xor128(T[0], S[7], X0);
+        aes_enc(T[1], S[0], S[7]);
+        xor128(T[2], S[1], S[6]);
+        aes_enc(T[3], S[2], S[1]);
+        xor128(T[4], S[3], X1);
+        aes_enc(T[5], S[4], S[3]);
+        aes_enc(T[6], S[5], S[4]);
+        xor128(T[7], S[0], S[6]);
+        #pragma unroll
+        for (int i = 0; i < 8; i++) copy128(S[i], T[i]);
+    }
+    __host__ __device__ static inline void get_Z0(uint8_t Z[16]) {
+        const uint8_t v[16] = {0xcd,0x65,0xef,0x23,0x91,0x44,0x37,0x71,
+                                0x22,0xae,0x28,0xd7,0x98,0x2f,0x8a,0x42};
+        copy128(Z, v);
+    }
+    __host__ __device__ static inline void get_Z1(uint8_t Z[16]) {
+        const uint8_t v[16] = {0xbc,0xdb,0x89,0x81,0xa5,0xdb,0xb5,0xe9,
+                                0x2f,0x3b,0x4d,0xec,0xcf,0xfb,0xc0,0xb5};
+        copy128(Z, v);
+    }
+    // Encode byte-length as 128-bit LE value (length*8 bits in low 8 bytes)
+    __host__ __device__ static inline void encode_len(uint64_t len_bytes, uint8_t out[16]) {
+        uint64_t lb = len_bytes * 8ULL;
+        #pragma unroll
+        for (int i = 0; i < 8; i++) out[i] = (uint8_t)((lb >> (8*i)) & 0xFF);
+        #pragma unroll
+        for (int i = 8; i < 16; i++) out[i] = 0;
+    }
+    // Initialize: S=(K1,N,Z0,Z1,N^K1,0,K0,0), 20 rounds R(S,Z0,Z1), S[0]^=K0, S[4]^=K1
+    __host__ __device__ static inline void init(uint8_t S[8][16], const uint8_t key[32], const uint8_t nonce[16]) {
+        const uint8_t* K0 = key; const uint8_t* K1 = key + 16;
+        uint8_t Z0[16], Z1[16]; get_Z0(Z0); get_Z1(Z1);
+        copy128(S[0], K1);
+        copy128(S[1], nonce);
+        copy128(S[2], Z0);
+        copy128(S[3], Z1);
+        xor128(S[4], nonce, K1);
+        zero128(S[5]);
+        copy128(S[6], K0);
+        zero128(S[7]);
+        for (int i = 0; i < 20; i++) round_update(S, Z0, Z1);
+        xor128(S[0], S[0], K0);
+        xor128(S[4], S[4], K1);
+    }
+    // Full AEAD encrypt (ad_len=0 OK). tag[16] output.
+    // Each 256-bit msg block: C0=AES(S[1],S[5])^M0, C1=AES(S[0]^S[4],S[2])^M1, R(S,M0,M1)
+    // Finalize: 20 rounds R(S,|AD|,|M|), T = XOR of S[0..7]
+    __host__ __device__ static void encrypt(const uint8_t* pt, uint8_t* ct, int pt_len,
+                                             const uint8_t* ad, int ad_len,
+                                             uint8_t tag[16],
+                                             const uint8_t key[32], const uint8_t nonce[16]) {
+        uint8_t S[8][16];
+        init(S, key, nonce);
+        // AD in 32-byte blocks
+        int ad_full = ad_len / 32;
+        for (int i = 0; i < ad_full; i++) round_update(S, ad + 32*i, ad + 32*i + 16);
+        int ad_rem = ad_len - 32 * ad_full;
+        if (ad_rem > 0) {
+            uint8_t pad[32] = {};
+            for (int i = 0; i < ad_rem; i++) pad[i] = ad[32*ad_full + i];
+            round_update(S, pad, pad + 16);
+        }
+        // Plaintext in 32-byte blocks
+        int pt_full = pt_len / 32;
+        for (int b = 0; b < pt_full; b++) {
+            const uint8_t* M0 = pt + 32*b; const uint8_t* M1 = M0 + 16;
+            uint8_t* C0 = ct + 32*b;       uint8_t* C1 = C0 + 16;
+            uint8_t tmp[16], z[16];
+            aes_enc(z, S[1], S[5]);         xor128(C0, z, M0);
+            xor128(tmp, S[0], S[4]);
+            aes_enc(z, tmp, S[2]);          xor128(C1, z, M1);
+            round_update(S, M0, M1);
+        }
+        int pt_rem = pt_len - 32 * pt_full;
+        if (pt_rem > 0) {
+            uint8_t pad[32] = {};
+            for (int i = 0; i < pt_rem; i++) pad[i] = pt[32*pt_full + i];
+            uint8_t tmp[16], z[16], C[32];
+            aes_enc(z, S[1], S[5]);         xor128(C, z, pad);
+            xor128(tmp, S[0], S[4]);
+            aes_enc(z, tmp, S[2]);          xor128(C + 16, z, pad + 16);
+            for (int i = 0; i < pt_rem; i++) ct[32*pt_full + i] = C[i];
+            round_update(S, pad, pad + 16);
+        }
+        // Finalize
+        uint8_t la[16], lm[16];
+        encode_len((uint64_t)ad_len, la); encode_len((uint64_t)pt_len, lm);
+        for (int i = 0; i < 20; i++) round_update(S, la, lm);
+        zero128(tag);
+        for (int i = 0; i < 8; i++) xor128(tag, tag, S[i]);
+    }
+    // Brute-force early-exit match: compare C0 (first 16 bytes of CT) only.
+    // Assumes ad_len=0 (benchmark/verify uses empty AD).
+    __host__ __device__ static bool match_first16(const uint8_t pt[16], const uint8_t ct_exp[16],
+                                                    const uint8_t key[32], const uint8_t nonce[16]) {
+        uint8_t S[8][16];
+        init(S, key, nonce);
+        uint8_t z[16];
+        aes_enc(z, S[1], S[5]);  // Z0 = AES(S[1], S[5])
+        #pragma unroll
+        for (int i = 0; i < 16; i++) {
+            if ((z[i] ^ pt[i]) != ct_exp[i]) return false;
+        }
+        return true;
+    }
+};
+
+// ============================================================
+// Rocca-S - AES-based AEAD (256-bit key, 256-bit tag)
+// Paper: "Ultra High-Throughput AES-Based Authenticated Encryption" (Anand et al.)
+//   State: 7 × 128-bit words. 16-round init. RF-1 round function (6 AES-enc).
+//   Output: C0=AES(S[3]^S[5],S[0])^M0, C1=AES(S[4]^S[6],S[2])^M1
+//   Tag: (S[0]^S[1]^S[2]^S[3]) || (S[4]^S[5]^S[6]) = 256 bits
+// ============================================================
+struct Rocca_S {
+    __host__ __device__ static inline void xor128(uint8_t r[16], const uint8_t a[16], const uint8_t b[16]) {
+        #pragma unroll
+        for (int i = 0; i < 16; i++) r[i] = a[i] ^ b[i];
+    }
+    __host__ __device__ static inline void copy128(uint8_t d[16], const uint8_t s[16]) {
+        #pragma unroll
+        for (int i = 0; i < 16; i++) d[i] = s[i];
+    }
+    __host__ __device__ static inline void zero128(uint8_t r[16]) {
+        #pragma unroll
+        for (int i = 0; i < 16; i++) r[i] = 0;
+    }
+    __host__ __device__ static inline void aes_enc(uint8_t out[16], const uint8_t x[16], const uint8_t y[16]) {
+        uint8_t t[16]; copy128(t, x);
+        AES128::subbytes(t); AES128::shiftrows(t); AES128::mixcolumns_fast(t);
+        xor128(out, t, y);
+    }
+    // Round function RF-1 R(S, X0, X1):
+    //   new[0]=S[6]^S[1]   new[1]=AES(S[0],X0)  new[2]=AES(S[1],S[0])
+    //   new[3]=AES(S[2],S[6])  new[4]=AES(S[3],X1)  new[5]=AES(S[4],S[3])
+    //   new[6]=AES(S[5],S[4])
+    __host__ __device__ static inline void round_update(uint8_t S[7][16], const uint8_t X0[16], const uint8_t X1[16]) {
+        uint8_t T[7][16];
+        xor128(T[0], S[6], S[1]);
+        aes_enc(T[1], S[0], X0);
+        aes_enc(T[2], S[1], S[0]);
+        aes_enc(T[3], S[2], S[6]);
+        aes_enc(T[4], S[3], X1);
+        aes_enc(T[5], S[4], S[3]);
+        aes_enc(T[6], S[5], S[4]);
+        #pragma unroll
+        for (int i = 0; i < 7; i++) copy128(S[i], T[i]);
+    }
+    __host__ __device__ static inline void get_Z0(uint8_t Z[16]) {
+        const uint8_t v[16] = {0xcd,0x65,0xef,0x23,0x91,0x44,0x37,0x71,
+                                0x22,0xae,0x28,0xd7,0x98,0x2f,0x8a,0x42};
+        copy128(Z, v);
+    }
+    __host__ __device__ static inline void get_Z1(uint8_t Z[16]) {
+        const uint8_t v[16] = {0xbc,0xdb,0x89,0x81,0xa5,0xdb,0xb5,0xe9,
+                                0x2f,0x3b,0x4d,0xec,0xcf,0xfb,0xc0,0xb5};
+        copy128(Z, v);
+    }
+    __host__ __device__ static inline void encode_len(uint64_t len_bytes, uint8_t out[16]) {
+        uint64_t lb = len_bytes * 8ULL;
+        #pragma unroll
+        for (int i = 0; i < 8; i++) out[i] = (uint8_t)((lb >> (8*i)) & 0xFF);
+        #pragma unroll
+        for (int i = 8; i < 16; i++) out[i] = 0;
+    }
+    // Init: S=(K1,N,Z0,K0,Z1,N^K1,0), 16 rounds, then feedforward XOR:
+    //   S[0]^=K0, S[1]^=K0, S[2]^=K1, S[3]^=K0, S[4]^=K0, S[5]^=K1, S[6]^=K1
+    __host__ __device__ static inline void init(uint8_t S[7][16], const uint8_t key[32], const uint8_t nonce[16]) {
+        const uint8_t* K0 = key; const uint8_t* K1 = key + 16;
+        uint8_t Z0[16], Z1[16]; get_Z0(Z0); get_Z1(Z1);
+        copy128(S[0], K1);
+        copy128(S[1], nonce);
+        copy128(S[2], Z0);
+        copy128(S[3], K0);
+        copy128(S[4], Z1);
+        xor128(S[5], nonce, K1);
+        zero128(S[6]);
+        for (int i = 0; i < 16; i++) round_update(S, Z0, Z1);
+        // Key feedforward
+        xor128(S[0], S[0], K0); xor128(S[1], S[1], K0); xor128(S[2], S[2], K1);
+        xor128(S[3], S[3], K0); xor128(S[4], S[4], K0);
+        xor128(S[5], S[5], K1); xor128(S[6], S[6], K1);
+    }
+    // Full AEAD encrypt. tag[32] output (256-bit).
+    // C0=AES(S[3]^S[5],S[0])^M0, C1=AES(S[4]^S[6],S[2])^M1
+    __host__ __device__ static void encrypt(const uint8_t* pt, uint8_t* ct, int pt_len,
+                                             const uint8_t* ad, int ad_len,
+                                             uint8_t tag[32],
+                                             const uint8_t key[32], const uint8_t nonce[16]) {
+        uint8_t S[7][16];
+        init(S, key, nonce);
+        // AD in 32-byte blocks
+        int ad_full = ad_len / 32;
+        for (int i = 0; i < ad_full; i++) round_update(S, ad + 32*i, ad + 32*i + 16);
+        int ad_rem = ad_len - 32 * ad_full;
+        if (ad_rem > 0) {
+            uint8_t pad[32] = {};
+            for (int i = 0; i < ad_rem; i++) pad[i] = ad[32*ad_full + i];
+            round_update(S, pad, pad + 16);
+        }
+        // Plaintext in 32-byte blocks
+        int pt_full = pt_len / 32;
+        for (int b = 0; b < pt_full; b++) {
+            const uint8_t* M0 = pt + 32*b; const uint8_t* M1 = M0 + 16;
+            uint8_t* C0 = ct + 32*b;       uint8_t* C1 = C0 + 16;
+            uint8_t tmp[16], z[16];
+            xor128(tmp, S[3], S[5]); aes_enc(z, tmp, S[0]); xor128(C0, z, M0);
+            xor128(tmp, S[4], S[6]); aes_enc(z, tmp, S[2]); xor128(C1, z, M1);
+            round_update(S, M0, M1);
+        }
+        int pt_rem = pt_len - 32 * pt_full;
+        if (pt_rem > 0) {
+            uint8_t pad[32] = {};
+            for (int i = 0; i < pt_rem; i++) pad[i] = pt[32*pt_full + i];
+            uint8_t tmp[16], z[16], C[32];
+            xor128(tmp, S[3], S[5]); aes_enc(z, tmp, S[0]); xor128(C, z, pad);
+            xor128(tmp, S[4], S[6]); aes_enc(z, tmp, S[2]); xor128(C + 16, z, pad + 16);
+            for (int i = 0; i < pt_rem; i++) ct[32*pt_full + i] = C[i];
+            round_update(S, pad, pad + 16);
+        }
+        // Finalize: 16 rounds, 256-bit tag
+        uint8_t la[16], lm[16];
+        encode_len((uint64_t)ad_len, la); encode_len((uint64_t)pt_len, lm);
+        for (int i = 0; i < 16; i++) round_update(S, la, lm);
+        zero128(tag); zero128(tag + 16);
+        for (int i = 0; i < 4; i++) xor128(tag,      tag,      S[i]);
+        for (int i = 4; i < 7; i++) xor128(tag + 16, tag + 16, S[i]);
+    }
+    // Brute-force match: compare C0 = AES(S[3]^S[5],S[0])^M0 with expected first 16 CT bytes
+    __host__ __device__ static bool match_first16(const uint8_t pt[16], const uint8_t ct_exp[16],
+                                                    const uint8_t key[32], const uint8_t nonce[16]) {
+        uint8_t S[7][16];
+        init(S, key, nonce);
+        uint8_t tmp[16], z[16];
+        xor128(tmp, S[3], S[5]);
+        aes_enc(z, tmp, S[0]);
+        #pragma unroll
+        for (int i = 0; i < 16; i++) {
+            if ((z[i] ^ pt[i]) != ct_exp[i]) return false;
+        }
+        return true;
+    }
+};
+
+// ============================================================
 // GRAIN-128AEADv2 - BITSLICED (32 Parallel Keys)
 // ============================================================
 struct Grain128AEADv2_Bitsliced {

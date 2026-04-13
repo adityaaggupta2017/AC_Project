@@ -544,7 +544,9 @@ enum class CipherType {
   ZUC_128,
   AES_128,
   SALSA20,
-  GRAIN128_AEADV2
+  GRAIN128_AEADV2,
+  ROCCA,
+  ROCCA_S
 };
 
 // ============================================================
@@ -1977,6 +1979,161 @@ inline MultiGpuBFResult brute_force_multi_gpu_simon(
   auto wall_end = std::chrono::high_resolution_clock::now();
   res.wall_seconds = std::chrono::duration<double>(wall_end - wall_start).count();
   cudaSetDevice(0); // restore default
+  return res;
+}
+
+// ============================================================
+// Rocca GPU Brute-Force Kernel
+// Sweeps low unknown_bits of K0[0..7] (LE), K0[8..15]=0, K1=0.
+// Compares C0 = AES(S[1],S[5]) ^ pt[0..15] with ct[0..15].
+// ============================================================
+
+template<bool ILP2, bool STOP_ON_FOUND>
+__global__ void bf_kernel_rocca(const uint8_t* d_pt, const uint8_t* d_ct,
+                                 const uint8_t* d_nonce,
+                                 uint64_t known_high, int unknown_bits, uint64_t N,
+                                 volatile int* d_found, uint64_t* d_found_key) {
+  const uint64_t tid    = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  const uint64_t stride = (uint64_t)gridDim.x  * blockDim.x;
+  const uint64_t base   = known_high << (uint64_t)unknown_bits;
+
+  auto test_one = [=] __device__ (uint64_t idx) {
+    if constexpr (STOP_ON_FOUND) { if (*d_found) return; }
+    const uint64_t k64 = base | idx;
+    uint8_t key[32] = {};
+    #pragma unroll
+    for (int j = 0; j < 8; j++) key[j] = (uint8_t)((k64 >> (8*j)) & 0xFF);
+    if (Rocca::match_first16(d_pt, d_ct, key, d_nonce)) {
+      if (atomicCAS((int*)d_found, 0, 1) == 0) *d_found_key = k64;
+    }
+  };
+
+  if constexpr (ILP2) {
+    for (uint64_t i = tid; i < N; i += stride * 2ULL) {
+      test_one(i);
+      if (i + stride < N) test_one(i + stride);
+    }
+  } else {
+    for (uint64_t i = tid; i < N; i += stride) test_one(i);
+  }
+}
+
+// ============================================================
+// Rocca-S GPU Brute-Force Kernel
+// Sweeps low unknown_bits of K0[0..7] (LE), K0[8..15]=0, K1=0.
+// Compares C0 = AES(S[3]^S[5],S[0]) ^ pt[0..15] with ct[0..15].
+// ============================================================
+
+template<bool ILP2, bool STOP_ON_FOUND>
+__global__ void bf_kernel_rocca_s(const uint8_t* d_pt, const uint8_t* d_ct,
+                                   const uint8_t* d_nonce,
+                                   uint64_t known_high, int unknown_bits, uint64_t N,
+                                   volatile int* d_found, uint64_t* d_found_key) {
+  const uint64_t tid    = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  const uint64_t stride = (uint64_t)gridDim.x  * blockDim.x;
+  const uint64_t base   = known_high << (uint64_t)unknown_bits;
+
+  auto test_one = [=] __device__ (uint64_t idx) {
+    if constexpr (STOP_ON_FOUND) { if (*d_found) return; }
+    const uint64_t k64 = base | idx;
+    uint8_t key[32] = {};
+    #pragma unroll
+    for (int j = 0; j < 8; j++) key[j] = (uint8_t)((k64 >> (8*j)) & 0xFF);
+    if (Rocca_S::match_first16(d_pt, d_ct, key, d_nonce)) {
+      if (atomicCAS((int*)d_found, 0, 1) == 0) *d_found_key = k64;
+    }
+  };
+
+  if constexpr (ILP2) {
+    for (uint64_t i = tid; i < N; i += stride * 2ULL) {
+      test_one(i);
+      if (i + stride < N) test_one(i + stride);
+    }
+  } else {
+    for (uint64_t i = tid; i < N; i += stride) test_one(i);
+  }
+}
+
+// ============================================================
+// Rocca / Rocca-S GPU Brute-Force Dispatch
+// variant: BASELINE (no ILP) or OPTIMIZED_ILP (ILP2)
+// Known high bits + unknown_bits → sweep low bits of K0[0..7]
+// ============================================================
+inline GpuBFResult brute_force_gpu_rocca(bool is_rocca_s,
+    const uint8_t* pt, const uint8_t* ct, const uint8_t* nonce,
+    uint64_t known_high, int unknown_bits,
+    GpuVariant variant, int blocks, int threads, int repeats)
+{
+  GpuBFResult res;
+  const uint64_t N = bf_space_size_gpu(unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+
+  cudaStream_t stream;
+  cuda_check(cudaStreamCreate(&stream), "rocca stream");
+
+  uint8_t *d_pt = nullptr, *d_ct = nullptr, *d_nonce = nullptr;
+  cuda_check(cudaMalloc(&d_pt,    16), "malloc rocca pt");
+  cuda_check(cudaMalloc(&d_ct,    16), "malloc rocca ct");
+  cuda_check(cudaMalloc(&d_nonce, 16), "malloc rocca nonce");
+  cuda_check(cudaMemcpy(d_pt,    pt,    16, cudaMemcpyHostToDevice), "H2D rocca pt");
+  cuda_check(cudaMemcpy(d_ct,    ct,    16, cudaMemcpyHostToDevice), "H2D rocca ct");
+  cuda_check(cudaMemcpy(d_nonce, nonce, 16, cudaMemcpyHostToDevice), "H2D rocca nonce");
+
+  int      *d_found     = nullptr;
+  uint64_t *d_found_key = nullptr;
+  cuda_check(cudaMalloc(&d_found,     sizeof(int)),      "malloc rocca found");
+  cuda_check(cudaMalloc(&d_found_key, sizeof(uint64_t)), "malloc rocca fkey");
+
+  const bool use_ilp = (variant == GpuVariant::OPTIMIZED_ILP);
+
+  auto reset = [&]() {
+    cudaMemsetAsync(d_found,     0, sizeof(int),      stream);
+    cudaMemsetAsync(d_found_key, 0, sizeof(uint64_t), stream);
+  };
+
+  auto launch_timed = [&]() {
+    if (!is_rocca_s) {
+      if (use_ilp) bf_kernel_rocca<true,false><<<blocks,threads,0,stream>>>(
+          d_pt, d_ct, d_nonce, known_high, unknown_bits, N, d_found, d_found_key);
+      else         bf_kernel_rocca<false,false><<<blocks,threads,0,stream>>>(
+          d_pt, d_ct, d_nonce, known_high, unknown_bits, N, d_found, d_found_key);
+    } else {
+      if (use_ilp) bf_kernel_rocca_s<true,false><<<blocks,threads,0,stream>>>(
+          d_pt, d_ct, d_nonce, known_high, unknown_bits, N, d_found, d_found_key);
+      else         bf_kernel_rocca_s<false,false><<<blocks,threads,0,stream>>>(
+          d_pt, d_ct, d_nonce, known_high, unknown_bits, N, d_found, d_found_key);
+    }
+    cuda_check(cudaGetLastError(), "rocca kernel launch");
+  };
+
+  const int iters = (repeats > 0) ? repeats : 1;
+  res.seconds = time_kernel_seconds_stream(reset, launch_timed, 2, iters, stream);
+
+  // Final key-finding run with early exit
+  reset();
+  if (!is_rocca_s) {
+    if (use_ilp) bf_kernel_rocca<true,true><<<blocks,threads,0,stream>>>(
+        d_pt, d_ct, d_nonce, known_high, unknown_bits, N, d_found, d_found_key);
+    else         bf_kernel_rocca<false,true><<<blocks,threads,0,stream>>>(
+        d_pt, d_ct, d_nonce, known_high, unknown_bits, N, d_found, d_found_key);
+  } else {
+    if (use_ilp) bf_kernel_rocca_s<true,true><<<blocks,threads,0,stream>>>(
+        d_pt, d_ct, d_nonce, known_high, unknown_bits, N, d_found, d_found_key);
+    else         bf_kernel_rocca_s<false,true><<<blocks,threads,0,stream>>>(
+        d_pt, d_ct, d_nonce, known_high, unknown_bits, N, d_found, d_found_key);
+  }
+  cuda_check(cudaStreamSynchronize(stream), "rocca sync verify");
+
+  int h_flag = 0; uint64_t h_key = 0;
+  cuda_check(cudaMemcpy(&h_flag, d_found,     sizeof(int),      cudaMemcpyDeviceToHost), "D2H rocca flag");
+  cuda_check(cudaMemcpy(&h_key,  d_found_key, sizeof(uint64_t), cudaMemcpyDeviceToHost), "D2H rocca key");
+  res.found     = (h_flag != 0);
+  res.found_key = h_key;
+
+  cudaFree(d_pt); cudaFree(d_ct); cudaFree(d_nonce);
+  cudaFree(d_found); cudaFree(d_found_key);
+  cudaStreamDestroy(stream);
   return res;
 }
 

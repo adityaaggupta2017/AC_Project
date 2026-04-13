@@ -646,3 +646,63 @@ inline CpuBFResult brute_force_cpu_grain128aeadv2(const uint8_t* pt, const uint8
   res.seconds = time_cpu_function(search_func, repeats);
   return res;
 }
+
+
+// ============================================================
+// CPU brute force for Rocca (256-bit key, 128-bit tag)
+// Sweeps low unknown_bits of K0 (key[0..7] LE). K0[8..15]=0, K1=0.
+// pt/ct: first 16 bytes (C0 comparison). nonce: 16 bytes.
+// ============================================================
+inline CpuBFResult brute_force_cpu_rocca(const uint8_t* pt, const uint8_t* ct,
+                                          const uint8_t* nonce,
+                                          uint64_t known_high, int unknown_bits, int repeats) {
+  CpuBFResult res;
+  const uint64_t N = bf_space_size_cpu(unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+  const uint64_t base_key = known_high << (uint64_t)unknown_bits;
+  auto search_func = [&]() {
+    bool found = false; uint64_t found_key = 0; uint64_t local_acc = 0;
+    for (uint64_t i = 0; i < N; i++) {
+      const uint64_t k = base_key | i;
+      uint8_t key[32] = {};
+      for (int j = 0; j < 8; j++) key[j] = (uint8_t)((k >> (8*j)) & 0xFF);
+      const bool match = Rocca::match_first16(pt, ct, key, nonce);
+      local_acc ^= ((uint64_t)(match ? 0x9b : 0x41) << (i & 7));
+      if (!found && match) { found = true; found_key = k; }
+    }
+    res.found = found; res.found_key = found_key;
+    cpu_bf_detail::mix_sink_u64(local_acc ^ found_key);
+  };
+  res.seconds = time_cpu_function(search_func, repeats);
+  return res;
+}
+
+// ============================================================
+// CPU brute force for Rocca-S (256-bit key, 256-bit tag)
+// Same sweep strategy as Rocca: low bits of K0[0..7].
+// ============================================================
+inline CpuBFResult brute_force_cpu_rocca_s(const uint8_t* pt, const uint8_t* ct,
+                                             const uint8_t* nonce,
+                                             uint64_t known_high, int unknown_bits, int repeats) {
+  CpuBFResult res;
+  const uint64_t N = bf_space_size_cpu(unknown_bits);
+  res.keys_tested = N;
+  if (N == 0) return res;
+  const uint64_t base_key = known_high << (uint64_t)unknown_bits;
+  auto search_func = [&]() {
+    bool found = false; uint64_t found_key = 0; uint64_t local_acc = 0;
+    for (uint64_t i = 0; i < N; i++) {
+      const uint64_t k = base_key | i;
+      uint8_t key[32] = {};
+      for (int j = 0; j < 8; j++) key[j] = (uint8_t)((k >> (8*j)) & 0xFF);
+      const bool match = Rocca_S::match_first16(pt, ct, key, nonce);
+      local_acc ^= ((uint64_t)(match ? 0x9b : 0x41) << (i & 7));
+      if (!found && match) { found = true; found_key = k; }
+    }
+    res.found = found; res.found_key = found_key;
+    cpu_bf_detail::mix_sink_u64(local_acc ^ found_key);
+  };
+  res.seconds = time_cpu_function(search_func, repeats);
+  return res;
+}

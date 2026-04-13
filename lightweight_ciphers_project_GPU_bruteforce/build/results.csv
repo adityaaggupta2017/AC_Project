@@ -1,3 +1,0 @@
-cipher,platform,variant,unknown_bits,keys_tested,seconds,keys_per_sec,found_key
-simon32_64,gpu,multigpu_single,20,1048576,8.12373e-05,1.29076e+10,0xa55a12343fffffff
-simon32_64,gpu,multigpu_2x,20,1048576,0.0489054,2.19817e+10,0xa55a12343fffffff

@@ -134,6 +134,24 @@ struct TestVector_Grain128AEADv2 {
   int ad_len;
 };
 
+struct TestVector_Rocca {
+  uint8_t key[32];    // K0=key[0..15], K1=key[16..31]
+  uint8_t nonce[16];
+  uint8_t pt[32];
+  uint8_t ct[32];
+  uint8_t tag[16];    // 128-bit tag
+  int pt_len;
+};
+
+struct TestVector_RoccaS {
+  uint8_t key[32];
+  uint8_t nonce[16];
+  uint8_t pt[32];
+  uint8_t ct[32];
+  uint8_t tag[32];    // 256-bit tag
+  int pt_len;
+};
+
 // SIMON 32/64 official test vector
 static TestVector_Simon simon_tv() {
   uint64_t key = 0;
@@ -555,6 +573,34 @@ static TestVector_Grain128AEADv2 grain128aeadv2_bench_tv() {
   return tv;
 }
 
+// Rocca benchmark TV: K0=bench_key64 LE, K1=0, 32-byte plaintext
+static TestVector_Rocca rocca_bench_tv() {
+  TestVector_Rocca tv{};
+  const uint64_t key64 = bench_key64_last_candidate();
+  store_u64_le(key64, tv.key, 8);  // K0[0..7], K0[8..15]=0, K1=0
+  const uint8_t nonce[16] = {0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
+                              0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x10};
+  memcpy(tv.nonce, nonce, 16);
+  memcpy(tv.pt, "Hello Rocca 5G6G!!Hello Rocca!.!", 32);
+  tv.pt_len = 32;
+  Rocca::encrypt(tv.pt, tv.ct, 32, nullptr, 0, tv.tag, tv.key, tv.nonce);
+  return tv;
+}
+
+// Rocca-S benchmark TV: K0=bench_key64 LE, K1=0, 32-byte plaintext
+static TestVector_RoccaS rocca_s_bench_tv() {
+  TestVector_RoccaS tv{};
+  const uint64_t key64 = bench_key64_last_candidate();
+  store_u64_le(key64, tv.key, 8);
+  const uint8_t nonce[16] = {0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
+                              0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x10};
+  memcpy(tv.nonce, nonce, 16);
+  memcpy(tv.pt, "Hello RoccaS 256!!Hello RoccaS!!", 32);
+  tv.pt_len = 32;
+  Rocca_S::encrypt(tv.pt, tv.ct, 32, nullptr, 0, tv.tag, tv.key, tv.nonce);
+  return tv;
+}
+
 // ============================================================
 // Self-Tests
 // ============================================================
@@ -848,6 +894,53 @@ static bool self_test_grain128aeadv2_bitsliced() {
   return pass;
 }
 
+// Rocca self-test: determinism + different keys produce different CT
+static bool self_test_rocca() {
+  // Test determinism with bench TV
+  auto tv = rocca_bench_tv();
+  uint8_t ct2[32] = {}, tag2[16] = {};
+  Rocca::encrypt(tv.pt, ct2, tv.pt_len, nullptr, 0, tag2, tv.key, tv.nonce);
+  bool pass = (memcmp(tv.ct, ct2, tv.pt_len) == 0) && (memcmp(tv.tag, tag2, 16) == 0);
+
+  // Test that key=0 gives different CT than bench key
+  if (pass) {
+    uint8_t zero_key[32] = {}, ct3[32] = {}, tag3[16] = {};
+    Rocca::encrypt(tv.pt, ct3, tv.pt_len, nullptr, 0, tag3, zero_key, tv.nonce);
+    pass &= (memcmp(tv.ct, ct3, tv.pt_len) != 0);
+  }
+  // Test match_first16 correctly identifies the key
+  if (pass) {
+    pass &= Rocca::match_first16(tv.pt, tv.ct, tv.key, tv.nonce);
+    uint8_t wrong_key[32] = {};
+    pass &= !Rocca::match_first16(tv.pt, tv.ct, wrong_key, tv.nonce);
+  }
+  std::cout << "Rocca Self-Test:     " << (pass ? "PASS" : "FAIL")
+            << " (determinism + key sensitivity + match_first16)\n";
+  return pass;
+}
+
+// Rocca-S self-test: same checks
+static bool self_test_rocca_s() {
+  auto tv = rocca_s_bench_tv();
+  uint8_t ct2[32] = {}, tag2[32] = {};
+  Rocca_S::encrypt(tv.pt, ct2, tv.pt_len, nullptr, 0, tag2, tv.key, tv.nonce);
+  bool pass = (memcmp(tv.ct, ct2, tv.pt_len) == 0) && (memcmp(tv.tag, tag2, 32) == 0);
+
+  if (pass) {
+    uint8_t zero_key[32] = {}, ct3[32] = {}, tag3[32] = {};
+    Rocca_S::encrypt(tv.pt, ct3, tv.pt_len, nullptr, 0, tag3, zero_key, tv.nonce);
+    pass &= (memcmp(tv.ct, ct3, tv.pt_len) != 0);
+  }
+  if (pass) {
+    pass &= Rocca_S::match_first16(tv.pt, tv.ct, tv.key, tv.nonce);
+    uint8_t wrong_key[32] = {};
+    pass &= !Rocca_S::match_first16(tv.pt, tv.ct, wrong_key, tv.nonce);
+  }
+  std::cout << "Rocca-S Self-Test:   " << (pass ? "PASS" : "FAIL")
+            << " (determinism + key sensitivity + match_first16)\n";
+  return pass;
+}
+
 static bool run_all_self_tests() {
   bool ok = true;
   ok &= self_test_simon();
@@ -864,6 +957,8 @@ static bool run_all_self_tests() {
   ok &= self_test_salsa20();
   ok &= self_test_grain128aeadv2();
   ok &= self_test_grain128aeadv2_bitsliced();
+  ok &= self_test_rocca();
+  ok &= self_test_rocca_s();
   return ok;
 }
 
@@ -1196,6 +1291,58 @@ static bool run_random_key_verification(int verify_bits = 1) {
     std::cout << "Grain-128AEADv2      " << (cp ? "PASS" : "FAIL") << "\n";
   }
 
+  // ── Rocca ────────────────────────────────────────────────────────────────
+  { bool cp = true;
+    const uint8_t rocca_nonce[16] = {0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
+                                      0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x10};
+    for (int t = 0; t < N; t++) {
+      uint64_t key64 = rkey64();
+      uint8_t key32[32] = {}, key32b[32] = {};
+      for (int i = 0; i < 8; i++) key32[i] = (uint8_t)((key64 >> (8*i)) & 0xFF);
+      // Encrypt 32-byte pt with key32 (K0=key32[0..15], K1=0)
+      uint8_t ct1[32]={}, tag1[16]={}, ct2[32]={}, tag2[16]={};
+      Rocca::encrypt(pt16, ct1, 16, nullptr, 0, tag1, key32, rocca_nonce);
+      Rocca::encrypt(pt16b, ct2, 16, nullptr, 0, tag2, key32, rocca_nonce);
+      // Brute-force only K0[0..7] (= key64), K0[8..15]=0, K1=0
+      auto r = brute_force_cpu_rocca(pt16, ct1, rocca_nonce, key64>>verify_bits, verify_bits, 1);
+      bool ok2 = false;
+      if (r.found) {
+        for (int i = 0; i < 8; i++) key32b[i] = (uint8_t)((r.found_key >> (8*i)) & 0xFF);
+        uint8_t oc[32]={}, ot[16]={};
+        Rocca::encrypt(pt16b, oc, 16, nullptr, 0, ot, key32b, rocca_nonce);
+        ok2 = (memcmp(oc, ct2, 16)==0 && memcmp(ot, tag2, 16)==0);
+      }
+      record("Rocca #" + std::to_string(t), r.found, r.found_key, key64, ok2);
+      cp &= (r.found && r.found_key == key64 && ok2);
+    }
+    std::cout << "Rocca                " << (cp ? "PASS" : "FAIL") << "\n";
+  }
+
+  // ── Rocca-S ───────────────────────────────────────────────────────────────
+  { bool cp = true;
+    const uint8_t rs_nonce[16] = {0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
+                                   0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x10};
+    for (int t = 0; t < N; t++) {
+      uint64_t key64 = rkey64();
+      uint8_t key32[32] = {}, key32b[32] = {};
+      for (int i = 0; i < 8; i++) key32[i] = (uint8_t)((key64 >> (8*i)) & 0xFF);
+      uint8_t ct1[32]={}, tag1[32]={}, ct2[32]={}, tag2[32]={};
+      Rocca_S::encrypt(pt16, ct1, 16, nullptr, 0, tag1, key32, rs_nonce);
+      Rocca_S::encrypt(pt16b, ct2, 16, nullptr, 0, tag2, key32, rs_nonce);
+      auto r = brute_force_cpu_rocca_s(pt16, ct1, rs_nonce, key64>>verify_bits, verify_bits, 1);
+      bool ok2 = false;
+      if (r.found) {
+        for (int i = 0; i < 8; i++) key32b[i] = (uint8_t)((r.found_key >> (8*i)) & 0xFF);
+        uint8_t oc[32]={}, ot[32]={};
+        Rocca_S::encrypt(pt16b, oc, 16, nullptr, 0, ot, key32b, rs_nonce);
+        ok2 = (memcmp(oc, ct2, 16)==0 && memcmp(ot, tag2, 32)==0);
+      }
+      record("Rocca-S #" + std::to_string(t), r.found, r.found_key, key64, ok2);
+      cp &= (r.found && r.found_key == key64 && ok2);
+    }
+    std::cout << "Rocca-S              " << (cp ? "PASS" : "FAIL") << "\n";
+  }
+
   // ── Summary ───────────────────────────────────────────────────────────────
   std::cout << "\nResults: " << (total - fail_count) << "/" << total << " passed";
   if (fail_count == 0) {
@@ -1367,7 +1514,7 @@ static Args parse_args(int argc, char** argv) {
     else if (s == "--help" || s == "-h") {
       std::cout
         << "Usage: bench [options]\n"
-        << "  --cipher <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|aes|salsa|grain128|all>\n"
+        << "  --cipher <simon|present|speck|grain|trivium|chacha|tinyjambu|zuc|snowv|aes|salsa|grain128|rocca|rocca_s|all>\n"
         << "           (default: all)\n"
         << "  --variants <baseline|optimized|optimized_ilp|shared|bitsliced|all|auto>\n"
         << "             (default: auto — best variants per cipher)\n"
@@ -1891,6 +2038,75 @@ static void benchmark_grain128aeadv2(const Args& a) {
   }
 }
 
+static void benchmark_rocca(const Args& a) {
+  std::cout << "\n=== Rocca Benchmark (256-bit key, 128-bit tag) ===\n";
+  std::cout << "Sweeping low bits of K0[0..7]. K0[8..15]=0, K1=0. Empty AD.\n";
+  auto tv = rocca_bench_tv();
+  // key64 = K0 low 64 bits
+  uint64_t key64 = 0;
+  for (int i = 0; i < 8; i++) key64 |= ((uint64_t)tv.key[i]) << (i*8);
+
+  for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+    uint64_t known_high = key64 >> b;
+    uint64_t N = bf_space_size_main(b);
+    std::cout << "\nunknown_bits=" << b << " (keys=" << N << ")\n";
+
+    if (a.run_cpu) {
+      auto cr = brute_force_cpu_rocca(tv.pt, tv.ct, tv.nonce, known_high, b, a.cpu_repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "CPU:                  " << cr.seconds << " s, " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "rocca,cpu,cpu_baseline," << b << "," << cr.keys_tested << "," << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+
+    if (a.run_gpu) {
+      for (auto v : {GpuVariant::BASELINE, GpuVariant::OPTIMIZED_ILP}) {
+        auto gr = brute_force_gpu_rocca(false, tv.pt, tv.ct, tv.nonce, known_high, b, v, a.blocks, a.threads, a.gpu_repeats);
+        double kps = safe_kps(gr.keys_tested, gr.seconds);
+        std::cout << "GPU " << gpu_variant_name(v) << ": " << gr.seconds << " s, " << kps << " keys/s, found=" << (gr.found ? "yes" : "no") << "\n";
+        std::ostringstream row;
+        row << "rocca,gpu," << gpu_variant_name(v) << "," << b << "," << gr.keys_tested << "," << gr.seconds << "," << kps << "," << u64_hex(gr.found ? gr.found_key : 0);
+        csv_append_row(a.out_csv, row.str());
+      }
+    }
+  }
+}
+
+static void benchmark_rocca_s(const Args& a) {
+  std::cout << "\n=== Rocca-S Benchmark (256-bit key, 256-bit tag) ===\n";
+  std::cout << "Sweeping low bits of K0[0..7]. K0[8..15]=0, K1=0. Empty AD.\n";
+  auto tv = rocca_s_bench_tv();
+  uint64_t key64 = 0;
+  for (int i = 0; i < 8; i++) key64 |= ((uint64_t)tv.key[i]) << (i*8);
+
+  for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+    uint64_t known_high = key64 >> b;
+    uint64_t N = bf_space_size_main(b);
+    std::cout << "\nunknown_bits=" << b << " (keys=" << N << ")\n";
+
+    if (a.run_cpu) {
+      auto cr = brute_force_cpu_rocca_s(tv.pt, tv.ct, tv.nonce, known_high, b, a.cpu_repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "CPU:                  " << cr.seconds << " s, " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "rocca_s,cpu,cpu_baseline," << b << "," << cr.keys_tested << "," << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+
+    if (a.run_gpu) {
+      for (auto v : {GpuVariant::BASELINE, GpuVariant::OPTIMIZED_ILP}) {
+        auto gr = brute_force_gpu_rocca(true, tv.pt, tv.ct, tv.nonce, known_high, b, v, a.blocks, a.threads, a.gpu_repeats);
+        double kps = safe_kps(gr.keys_tested, gr.seconds);
+        std::cout << "GPU " << gpu_variant_name(v) << ": " << gr.seconds << " s, " << kps << " keys/s, found=" << (gr.found ? "yes" : "no") << "\n";
+        std::ostringstream row;
+        row << "rocca_s,gpu," << gpu_variant_name(v) << "," << b << "," << gr.keys_tested << "," << gr.seconds << "," << kps << "," << u64_hex(gr.found ? gr.found_key : 0);
+        csv_append_row(a.out_csv, row.str());
+      }
+    }
+  }
+}
+
 // ============================================================
 // main
 // ============================================================
@@ -1930,9 +2146,11 @@ int main(int argc, char** argv) {
     else if (name == "aes") benchmark_aes(a);
     else if (name == "salsa") benchmark_salsa20(a);
     else if (name == "grain128") benchmark_grain128aeadv2(a);
+    else if (name == "rocca")   benchmark_rocca(a);
+    else if (name == "rocca_s") benchmark_rocca_s(a);
     else {
       std::cerr << "Unknown cipher: " << name << "\n";
-      std::cerr << "Valid: simon, present, speck, grain, trivium, chacha, tinyjambu, zuc, snowv, aes, salsa, grain128, all\n";
+      std::cerr << "Valid: simon, present, speck, grain, trivium, chacha, tinyjambu, zuc, snowv, aes, salsa, grain128, rocca, rocca_s, all\n";
       std::exit(1);
     }
   };
@@ -1976,6 +2194,8 @@ int main(int argc, char** argv) {
     benchmark_aes(a);
     benchmark_salsa20(a);
     benchmark_grain128aeadv2(a);
+    benchmark_rocca(a);
+    benchmark_rocca_s(a);
   } else {
     run_one(a.cipher);
   }
