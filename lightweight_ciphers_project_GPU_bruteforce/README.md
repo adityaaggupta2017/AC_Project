@@ -1,6 +1,6 @@
         # Lightweight Ciphers — GPU Brute-Force Benchmark
 
-        Partial-key brute-force throughput benchmarks (CPU and CUDA GPU) for twelve lightweight and
+        Partial-key brute-force throughput benchmarks (CPU and CUDA GPU) for fourteen lightweight and
         modern stream/block/AEAD ciphers. The project sweeps over a configurable range of unknown key
         bits and measures how many candidate keys per second each implementation can test.
 
@@ -41,6 +41,8 @@
         | 10 | **AES-128** | Block | Low 64 of 128-bit key | NIST FIPS 197; 10-round SPN |
         | 11 | **Salsa20** | Stream (ARX) | Low 64 of 256-bit key | eSTREAM portfolio; 64-bit nonce |
         | 12 | **Grain-128AEADv2** | AEAD | Low 64 of 128-bit key | NIST LWC finalist; 96-bit nonce, 64-bit tag |
+        | 13 | **Rocca** | AEAD | Low 64 of 256-bit key (K0) | 5G/6G AES-based; 128-bit nonce, 128-bit tag |
+        | 14 | **Rocca-S** | AEAD | Low 64 of 256-bit key (K0) | Evolution of Rocca; 128-bit nonce, 256-bit tag |
 
         ---
 
@@ -86,6 +88,8 @@
         | AES-128 | baseline, optimized, optimized_ilp |
         | Salsa20 | baseline, optimized, optimized_ilp |
         | Grain-128AEADv2 | baseline, optimized_ilp, **bitsliced** |
+        | Rocca | baseline, optimized_ilp |
+        | Rocca-S | baseline, optimized_ilp |
 
         ---
 
@@ -577,6 +581,118 @@
 
         ---
 
+        ### 13. Rocca
+
+        Rocca is an AES-based AEAD cipher targeting 5G/6G applications. It uses a 256-bit key
+        (K0 || K1, each 128-bit), a 128-bit nonce, and produces a 128-bit authentication tag.
+        The 8-word (128-bit per word) state is updated via a round function combining 4 AES
+        encryption steps and 4 XOR operations per round. Initialization runs 20 rounds; finalization
+        runs 20 rounds with encoded message-length constants. The brute-force sweeps the low 64
+        bits of K0; K0[8..15] and K1 are held at zero.
+
+        #### aes_enc primitive
+
+        `aes_enc(out, x, round_key)` = `MixColumns(ShiftRows(SubBytes(x))) XOR round_key` —
+        implemented using the existing `AES128::subbytes + shiftrows + mixcolumns_fast + xor128`
+        helpers from `ciphers_enhanced.cuh`, compatible with both host and device code without
+        needing AES-NI intrinsics on GPU.
+
+        #### Z constants (shared with Rocca-S)
+
+        ```
+        Z0 = 428a2f98d728ae227137449123ef65cd   (fractional part of √2)
+        Z1 = b5c0fbcfec4d3b2fe9b5dba58189dbbc   (fractional part of √3)
+        ```
+        Stored as 16-byte little-endian arrays; retrieved via `get_Z0()` / `get_Z1()` device
+        functions to avoid `static const` issues in CUDA device code.
+
+        #### Rocca round function (8-word state, X0 and X1 are message/AD words)
+
+        ```
+        new[0] = S[7] ^ X0
+        new[1] = AES(S[0], S[7])
+        new[2] = S[1] ^ S[6]
+        new[3] = AES(S[2], S[1])
+        new[4] = S[3] ^ X1
+        new[5] = AES(S[4], S[3])
+        new[6] = AES(S[5], S[4])
+        new[7] = S[0] ^ S[6]
+        ```
+
+        #### gpu0_baseline — Full AEAD with early-exit first-block check, 1 key/thread
+
+        Calls `Rocca::match_first16(pt, ct, nonce, key_low, key_high)` which:
+        1. Assembles the 256-bit key from the sweep candidate and fixed high bits.
+        2. Runs the full 20-round initialization.
+        3. Encrypts the first plaintext block (16 bytes) to produce C0.
+        4. **Returns false immediately** if C0 ≠ first 16 bytes of ciphertext — no further
+        encryption or tag computation is needed for wrong keys.
+
+        #### gpu2_optimized+ilp — First-block match + ILP2
+
+        Same `match_first16` as baseline plus **ILP2** (2 keys per thread per loop). The two
+        independent 8-word AES-round pipelines overlap each other's instruction latency.
+
+        | Variant | Bytes compared | Keys/thread/iter |
+        |---------|---------------|-----------------|
+        | `gpu0_baseline` | 16 (first ciphertext block) | 1 |
+        | `gpu2_optimized+ilp` | 16 (first ciphertext block) | 2 |
+
+        ---
+
+        ### 14. Rocca-S
+
+        Rocca-S is an evolution of Rocca with a larger 256-bit authentication tag and a redesigned
+        7-word state. It uses the same 256-bit key and 128-bit nonce as Rocca but applies 6 AES
+        encryption steps and 1 XOR per round (called RF-1). Initialization and finalization each
+        run 16 rounds (vs 20 in Rocca). The larger tag provides 256-bit authentication security.
+
+        #### Rocca-S round function (7-word state)
+
+        ```
+        new[0] = S[6] ^ S[1]
+        new[1] = AES(S[0], X0)
+        new[2] = AES(S[1], S[0])
+        new[3] = AES(S[2], S[6])
+        new[4] = AES(S[3], X1)
+        new[5] = AES(S[4], S[3])
+        new[6] = AES(S[5], S[4])
+        ```
+
+        #### Initialization (16 rounds) and feedforward
+
+        Initial state: `S = (K1, N, Z0, K0, Z1, N^K1, 0)`.
+        After 16 rounds: `S[0]^=K0, S[1]^=K0, S[2]^=K1, S[3]^=K0, S[4]^=K0, S[5]^=K1, S[6]^=K1`.
+
+        #### Ciphertext generation (per 32-byte message block M0||M1)
+
+        ```
+        C0 = AES(S[3]^S[5], S[0]) ^ M0
+        C1 = AES(S[4]^S[6], S[2]) ^ M1
+        then: round(S, M0, M1)
+        ```
+
+        #### 256-bit tag
+
+        After 16 finalization rounds: `tag = (S[0]^S[1]^S[2]^S[3]) || (S[4]^S[5]^S[6])`.
+
+        #### gpu0_baseline — First-block match, 1 key/thread
+
+        Calls `Rocca_S::match_first16(pt, ct, nonce, key_low, key_high)` which runs the 16-round
+        init and compares only C0 (first 16 bytes). **Returns false immediately** on mismatch —
+        avoids C1 computation, 16 finalization rounds, and 256-bit tag generation for wrong keys.
+
+        #### gpu2_optimized+ilp — First-block match + ILP2
+
+        Same `match_first16` plus **ILP2** (2 keys per thread per loop).
+
+        | Variant | Bytes compared | Keys/thread/iter |
+        |---------|---------------|-----------------|
+        | `gpu0_baseline` | 16 (first ciphertext block) | 1 |
+        | `gpu2_optimized+ilp` | 16 (first ciphertext block) | 2 |
+
+        ---
+
         ## CPU Optimizations
 
         The CPU reference implementation uses the same cipher structs from `ciphers_enhanced.cuh`.
@@ -617,18 +733,26 @@
         | **Trivium** | IV copied to local stack; 1152-clock init unavoidable |
         | **ZUC-128** | IV copied to local stack; match_keystream for early exit |
 
-        ### AEAD Ciphers (TinyJAMBU-128, Grain-128AEADv2)
+        ### AEAD Ciphers (TinyJAMBU-128, Grain-128AEADv2, Rocca, Rocca-S)
 
-        Both AEAD cipher CPU implementations also use **early-exit keystream matching** via
-        `match_keystream()`:
+        All AEAD cipher CPU implementations use **early-exit first-block matching** via
+        `match_first16()` or `match_keystream()`:
 
         1. Run full cipher initialization (unavoidable)
-        2. Compare keystream bytes against `pt XOR ct` byte-by-byte
-        3. **Skip tag computation entirely** for wrong keys — return false on first byte mismatch
-        4. Only compute and verify the tag when all plaintext bytes match (rare: only the correct key)
+        2. Compare only the first ciphertext block (16 bytes) against the expected output
+        3. **Skip tag computation entirely** for wrong keys — return false on first block mismatch
+        4. Only verify the full tag when the first block matches (rare: only the correct key)
 
         This avoids the expensive tag generation (P640 finalization for TinyJAMBU; 64 additional
-        MAC clock cycles for Grain-128AEADv2) for the vast majority of candidates.
+        MAC clock cycles for Grain-128AEADv2; 20 finalization rounds for Rocca; 16 finalization
+        rounds + 256-bit tag for Rocca-S) for the vast majority of candidates.
+
+        Additional per-cipher CPU notes for Rocca/Rocca-S:
+
+        | Cipher | CPU Optimization |
+        |--------|----------------|
+        | **Rocca** | `match_first16` checks only C0 (16 bytes); avoids 20 finalization rounds + 128-bit tag; AES round function uses gmul2/gmul3 fast MixColumns |
+        | **Rocca-S** | `match_first16` checks only C0 (16 bytes); avoids C1, 16 finalization rounds + 256-bit tag; same AES primitive |
 
         ---
 
@@ -641,7 +765,7 @@
         ├── plot_results.py                   # Visualization script (per-cipher + summary plots)
         ├── src/
         │   ├── main.cu                       # Benchmark driver, self-tests, CLI parsing
-        │   ├── ciphers_enhanced.cuh          # All 12 cipher implementations (host + device)
+        │   ├── ciphers_enhanced.cuh          # All 14 cipher implementations (host + device)
         │   ├── bruteforce_gpu_enhanced.cuh   # GPU kernels, CipherType/GpuVariant enums, launch helpers
         │   ├── bruteforce_cpu.hpp            # CPU brute-force reference implementations
         │   ├── present_spbox_tables.inc      # Pre-generated PRESENT-80 SP-box lookup tables
@@ -691,13 +815,13 @@
 
         ## Self-Tests
 
-        Verifies all 12 cipher implementations against official test vectors before any benchmarking.
+        Verifies all 14 cipher implementations against official test vectors before any benchmarking.
 
         ```bash
         ./bench --test
         ```
 
-        Expected output (14 tests):
+        Expected output (16 tests):
         ```
         SIMON32/64 Self-Test:                  PASS
         PRESENT-80 Self-Test:                  PASS
@@ -713,6 +837,8 @@
         Salsa20 Self-Test:                     PASS
         Grain-128AEADv2 Self-Test:             PASS
         Grain-128AEADv2 Bitsliced Test:        PASS
+        Rocca Self-Test:                       PASS (determinism + key sensitivity + match_first16)
+        Rocca-S Self-Test:                     PASS (determinism + key sensitivity + match_first16)
         ```
 
         ### Test Vectors Used
@@ -731,6 +857,20 @@
         | AES-128 | NIST FIPS 197 Appendix B |
         | Salsa20 | eSTREAM Set 1 vector 1 |
         | Grain-128AEADv2 | NIST LWC Grain-128AEAD v2 specification |
+        | Rocca | Determinism + key-sensitivity self-test (no KAT appendix in paper) |
+        | Rocca-S | Determinism + key-sensitivity self-test (no KAT appendix in paper) |
+
+        ### Rocca and Rocca-S: No Official KAT Vectors
+
+        The Rocca (ePrint 2022/116) and Rocca-S design papers do not include Known-Answer Test
+        (KAT) appendices with reference input/output pairs. The self-tests therefore verify:
+        1. **Determinism**: encrypting the same PT+key+nonce twice yields identical CT and tag.
+        2. **Key sensitivity**: changing any key bit produces a completely different CT.
+        3. **match_first16 correctness**: the brute-force helper correctly identifies the right key
+        and rejects wrong keys in a 1-bit sweep (2-candidate search).
+
+        Correctness is further confirmed by the `--verify` mode (randomized key recovery), which
+        exercises the full encrypt + brute-force + verify pipeline for 5 random keys per cipher.
 
         ### Grain-128AEADv2 NIST Test Vector
 
@@ -747,7 +887,7 @@
 
         All commands below assume you are inside the `build/` directory.
 
-        ### Run all 12 ciphers (recommended full benchmark)
+        ### Run all 14 ciphers (recommended full benchmark)
 
         ```bash
         ./bench --cipher all \
@@ -932,6 +1072,52 @@
                 --out ../results_grain128_all.csv
         ```
 
+        #### 13. Rocca
+
+        ```bash
+        ./bench --cipher rocca --min_bits 1 --max_bits 30 --step_bits 1 --out results_rocca.csv
+        ```
+
+        GPU only (recommended — Rocca is AES-heavy, GPU is much faster):
+        ```bash
+        ./bench --cipher rocca --min_bits 1 --max_bits 30 --gpu_only --out results_rocca.csv
+        ```
+
+        Run specific variants:
+        ```bash
+        # Baseline only (1 key/thread, first-block early exit)
+        ./bench --cipher rocca --variants baseline --min_bits 1 --max_bits 30 --out results_rocca_baseline.csv
+
+        # ILP2 (2 keys/thread — fastest)
+        ./bench --cipher rocca --variants optimized_ilp --min_bits 1 --max_bits 30 --out results_rocca_ilp.csv
+        ```
+
+        #### 14. Rocca-S
+
+        ```bash
+        ./bench --cipher rocca_s --min_bits 1 --max_bits 30 --step_bits 1 --out results_rocca_s.csv
+        ```
+
+        GPU only:
+        ```bash
+        ./bench --cipher rocca_s --min_bits 1 --max_bits 30 --gpu_only --out results_rocca_s.csv
+        ```
+
+        Run specific variants:
+        ```bash
+        # Baseline only (1 key/thread, first-block early exit, skips 256-bit tag for wrong keys)
+        ./bench --cipher rocca_s --variants baseline --min_bits 1 --max_bits 30 --out results_rocca_s_baseline.csv
+
+        # ILP2 (2 keys/thread — fastest)
+        ./bench --cipher rocca_s --variants optimized_ilp --min_bits 1 --max_bits 30 --out results_rocca_s_ilp.csv
+        ```
+
+        Compare Rocca and Rocca-S side by side:
+        ```bash
+        ./bench --cipher rocca   --gpu_only --min_bits 1 --max_bits 30 --out results_rocca.csv
+        ./bench --cipher rocca_s --gpu_only --min_bits 1 --max_bits 30 --out results_rocca_s.csv
+        ```
+
         ---
 
         ### Selecting GPU Variants Manually
@@ -962,7 +1148,7 @@
 
         ## Randomized Correctness Verification
 
-        Run `--verify` to execute a randomized correctness test for all 12 ciphers without benchmarking:
+        Run `--verify` to execute a randomized correctness test for all 14 ciphers without benchmarking:
 
         ```bash
         ./bench --verify
@@ -976,7 +1162,7 @@
 
         ### What --verify does
 
-        For each of the 12 ciphers:
+        For each of the 14 ciphers:
 
         1. **5 random keys** are generated (seeded with `srand(42)` for reproducibility).
         2. Each key encrypts a fixed plaintext (PT1) to produce ciphertext (CT1).
@@ -1011,8 +1197,10 @@
         AES-128              PASS
         Salsa20              PASS
         Grain-128AEADv2      PASS
+        Rocca                PASS
+        Rocca-S              PASS
 
-        Results: 60/60 passed — no failure cases detected.
+        Results: 70/70 passed — no failure cases detected.
         ```
 
         Example output (with a failure):
@@ -1032,7 +1220,8 @@
         Usage: bench [options]
         --cipher <name|all>
         simon | present | speck | grain | trivium | chacha |
-        tinyjambu | zuc | snowv | aes | salsa | grain128 | all
+        tinyjambu | zuc | snowv | aes | salsa | grain128 |
+        rocca | rocca_s | all
         (default: all)
 
         --variants <mode>
@@ -1272,6 +1461,8 @@
         | Compare eSTREAM portfolio | `--cipher grain` then `--cipher trivium` |
         | Compare AEAD ciphers | `--cipher tinyjambu` then `--cipher grain128` |
         | Compare Grain variants | `--cipher grain` then `--cipher grain128` |
+        | Compare Rocca vs Rocca-S throughput | `--cipher rocca --gpu_only` then `--cipher rocca_s --gpu_only` |
+        | Rocca/Rocca-S ILP effect | `--cipher rocca --variants baseline` then `--cipher rocca --variants optimized_ilp` |
         | Verify correctness after code changes | `./bench --verify --verify_bits 4` |
         | Multi-GPU scaling study | `--multi_gpu --min_bits 20 --max_bits 30 --step_bits 2` |
         | Key strategy comparison | `--key_strategy low --min_bits 1 --max_bits 20 --gpu_only` |
