@@ -6,6 +6,7 @@ CMakeFiles/bench.dir/src/main.cu.o
  /home/sahil22430/diffusion_experiments/IP_Project_Crypto/AC_Project/lightweight_ciphers_project_GPU_bruteforce/src/bruteforce_cpu.hpp
  /home/sahil22430/diffusion_experiments/IP_Project_Crypto/AC_Project/lightweight_ciphers_project_GPU_bruteforce/src/bruteforce_gpu_enhanced.cuh
  /home/sahil22430/diffusion_experiments/IP_Project_Crypto/AC_Project/lightweight_ciphers_project_GPU_bruteforce/src/ciphers_enhanced.cuh
+ /home/sahil22430/diffusion_experiments/IP_Project_Crypto/AC_Project/lightweight_ciphers_project_GPU_bruteforce/src/cpu_optimized.hpp
  /home/sahil22430/diffusion_experiments/IP_Project_Crypto/AC_Project/lightweight_ciphers_project_GPU_bruteforce/src/present_spbox_tables.inc
  /home/sahil22430/diffusion_experiments/IP_Project_Crypto/AC_Project/lightweight_ciphers_project_GPU_bruteforce/src/util.hpp
  /usr/include/alloca.h
@@ -300,11 +301,20 @@ CMakeFiles/bench.dir/src/main.cu.o
  /usr/include/x86_64-linux-gnu/sys/cdefs.h
  /usr/include/x86_64-linux-gnu/sys/select.h
  /usr/include/x86_64-linux-gnu/sys/types.h
+ /usr/lib/gcc/x86_64-linux-gnu/9/include/emmintrin.h
  /usr/lib/gcc/x86_64-linux-gnu/9/include/limits.h
+ /usr/lib/gcc/x86_64-linux-gnu/9/include/mm_malloc.h
+ /usr/lib/gcc/x86_64-linux-gnu/9/include/mmintrin.h
+ /usr/lib/gcc/x86_64-linux-gnu/9/include/pmmintrin.h
+ /usr/lib/gcc/x86_64-linux-gnu/9/include/popcntintrin.h
+ /usr/lib/gcc/x86_64-linux-gnu/9/include/smmintrin.h
  /usr/lib/gcc/x86_64-linux-gnu/9/include/stdarg.h
  /usr/lib/gcc/x86_64-linux-gnu/9/include/stddef.h
  /usr/lib/gcc/x86_64-linux-gnu/9/include/stdint.h
  /usr/lib/gcc/x86_64-linux-gnu/9/include/syslimits.h
+ /usr/lib/gcc/x86_64-linux-gnu/9/include/tmmintrin.h
+ /usr/lib/gcc/x86_64-linux-gnu/9/include/wmmintrin.h
+ /usr/lib/gcc/x86_64-linux-gnu/9/include/xmmintrin.h
  /usr/local/cuda-12.0/targets/x86_64-linux/include/builtin_types.h
  /usr/local/cuda-12.0/targets/x86_64-linux/include/channel_descriptor.h
  /usr/local/cuda-12.0/targets/x86_64-linux/include/crt/common_functions.h

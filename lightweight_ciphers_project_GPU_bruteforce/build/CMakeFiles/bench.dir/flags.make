@@ -6,5 +6,5 @@ CUDA_DEFINES =
 
 CUDA_INCLUDES = --options-file CMakeFiles/bench.dir/includes_CUDA.rsp
 
-CUDA_FLAGS = -O3 -DNDEBUG -std=c++17 "--generate-code=arch=compute_86,code=[compute_86,sm_86]" --expt-relaxed-constexpr -O3 --use_fast_math --extended-lambda
+CUDA_FLAGS = -O3 -DNDEBUG -std=c++17 "--generate-code=arch=compute_86,code=[compute_86,sm_86]" --expt-relaxed-constexpr -O3 --use_fast_math --extended-lambda -Xcompiler -maes,-msse4.1,-mavx2
 

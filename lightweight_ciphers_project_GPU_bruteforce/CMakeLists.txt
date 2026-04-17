@@ -28,6 +28,6 @@ if (CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 11.2)
 endif()
 
 target_compile_options(bench PRIVATE
-  $<$<COMPILE_LANGUAGE:CXX>:-O3>
-  $<$<COMPILE_LANGUAGE:CUDA>:-O3 --use_fast_math --extended-lambda>
+  $<$<COMPILE_LANGUAGE:CXX>:-O3 -maes -msse4.1 -mavx2>
+  $<$<COMPILE_LANGUAGE:CUDA>:-O3 --use_fast_math --extended-lambda -Xcompiler -maes,-msse4.1,-mavx2>
 )

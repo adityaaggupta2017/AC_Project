@@ -1,0 +1,149 @@
+Here's a consolidated literature survey on optimized CPU software implementations for each of your twelve ciphers. I'm reporting the best-published cycles per byte (cpb) figures and the principal optimization techniques, with source citations.
+
+---
+
+## Literature Survey: Optimized CPU Implementations
+
+### 1. SPECK 64/128
+
+**Best reported performance:** ~1.27 cpb on Intel Core i5-6600 and 1.99 cpb on AMD Ryzen 7 1700 for the 128/128 variant; the 64/128 variant is proportionally slower due to a 32-bit word size that maps less efficiently to 64-bit registers.
+
+**Key optimization techniques:** Being a pure ARX (Add-Rotate-XOR) cipher with no S-box, SPECK is naturally suited for scalar and SIMD acceleration. The official NSA SUPERCOP repository contains x86 and ARM implementations exploiting SSE4.2, AVX2, and NEON instruction sets. Parallel CTR-mode pipelines using AVX2 hide round-function latency. On 8-bit AVR, SPECK 64/128 takes 164 cycles/byte and consumes 192 bytes of flash — acceptable for constrained devices.
+
+**Key reference:** Beaulieu et al. (NSA), "Simon and Speck: Block Ciphers for the Internet of Things," NIST LWC Workshop 2015.
+
+---
+
+### 2. SIMON 32/64
+
+**Best reported performance:** On ARM Cortex-A53 with optimized NEON, SIMON 128/128 achieves 32.4 cpb single-threaded; with OpenMP SIMT, this drops to 14.3 cpb. For the smaller 32/64 variant, scalar performance is poorer due to heavy AND-rotation dependence but it benefits strongly from bitslicing.
+
+**Key optimization techniques:** SIMON's round function (AND + XOR + rotate) is naturally bitslice-friendly. The key technique is efficient forward and backward alignment for 64-bit block packing using `vtrn` NEON instructions, combined with minimizing NEON registers for round keys to free slots for more plaintext blocks. On x86, SSE4.2 implementations process multiple blocks in parallel.
+
+**Key reference:** Koo et al., "Parallel Implementations of SIMON and SPECK, Revisited," 2017.
+
+---
+
+### 3. ChaCha20
+
+**Best reported performance:** On Intel Haswell with AVX2, ChaCha20 achieves approximately 1.43 cpb for 4 KB messages — roughly 2× faster than the then-current Chromium implementation.
+
+**Key optimization techniques:** ChaCha20's quarter-round structure admits four independent parallel lanes, mapping directly onto 128-bit SSE/NEON registers. With AVX2 (256-bit), two block functions are computed simultaneously; with AVX-512 (512-bit), four block functions run in parallel. Two of ChaCha's four rotations are multiples of 8 bits, enabling byte-shuffle (`pshufb`) instead of a general rotate, saving latency. OpenSSL uses stitched implementations that interleave ChaCha keystream generation with Poly1305 MAC to hide latency.
+
+**Key reference:** Goll & Gueron, "Vectorization of ChaCha Stream Cipher," ePrint 2013/759.
+
+---
+
+### 4. TinyJAMBU-128
+
+**Best reported performance:** The designers report a 32-bit C implementation tested on Intel Core i7-6550U at 3.4 GHz with `-O3`; specific cpb values for plaintext encryption are given in Tables 7.2 and 7.3 of the spec (typically in the range of ~4–8 cpb at 32-bit word width).
+
+**Key optimization techniques:** TinyJAMBU's state-update function is a 128-bit NFSR with a single NAND non-linearity. Word-extraction operations account for roughly 80% of execution time in the state update, so the most effective ISE focuses on replacing these with a single fused instruction. For 64-bit systems, a variant divides the 128-bit state into two 64-bit words rather than four 32-bit words, halving the shift-and-OR count; x86-64 and ARM64 platforms benefit automatically. The NIST submission includes both reference and optimized implementations, with the optimized one exploiting 32- or 64-bit word-parallel feedback.
+
+**Key reference:** Wu & Huang, "TinyJAMBU: A Family of Lightweight Authenticated Encryption Algorithms," NIST LWC Final Spec, 2021; also Hirose et al., "Performance Evaluation of NIST LWC Finalists on AVR ATmega and ARM Cortex-M3," ePrint 2022/1071.
+
+---
+
+### 5. Salsa20
+
+**Best reported performance:** Salsa20 offers speeds of around 4–14 cpb on modern x86 processors, depending on SIMD width. Bernstein's hand-optimized `amd64` SUPERCOP implementation typically achieves ~3–5 cpb on Haswell-era hardware.
+
+**Key optimization techniques:** Salsa20's 4×4 matrix of 32-bit words maps directly to a 128-bit XMM register. Optimized implementations using SSE/AVX/AVX2/AVX-512 C intrinsics are publicly available, including versions for the Intel C compiler and GCC. Bernstein showed that even partially unrolled (4 rounds per loop iteration) code avoids instruction cache pressure while maintaining throughput. Counter-mode parallelism means multiple blocks can be pipelined.
+
+**Key reference:** Bernstein, "Salsa20 Speed," cr.yp.to 2007; Dolbeau (dolbeau.name), SSE/AVX/AVX-512 intrinsics implementations in SUPERCOP.
+
+---
+
+### 6. ZUC-128
+
+**Best reported performance:** ZUC-128 has historically been considered CPU-unfriendly because its modular arithmetic (mod 2³¹−1) and S-box lookups resist SIMD pipelining. Unoptimized software runs at ~100+ cpb (e.g., GmSSL). A PCLMULQDQ-accelerated implementation achieves approximately 1.01 cpb for ZUC-128 authentication (EIA3), representing a ~124× speedup over GmSSL.
+
+**Key optimization techniques:** Up to now, hardware optimization of ZUC-128 has been fruitful with IP cores reaching 100 Gbps; software speed has lagged and received comparatively little research attention. The main software approaches are: (1) precomputing S-box lookups in tables to reduce per-round cost, (2) using AES-NI to implement ZUC's S-boxes (since ZUC's S0/S1 boxes have structure compatible with AES round function), and (3) exploiting PCLMULQDQ for the authentication MAC. AES-NI can be leveraged for ZUC-256 (and similarly ZUC-128) to create constant-time implementations with speedup of up to 4.5× per keystream when parallelized efficiently.
+
+**Key reference:** Intel patent application on efficient ZUC-EIA3 authentication via PCLMULQDQ (TREA, 2019); Drucker & Gueron, "Fast Constant Time Implementations of ZUC-256 on x86 CPUs," ePrint 2019.
+
+---
+
+### 7. PRESENT-80
+
+**Best reported performance:** The best non-bitsliced PRESENT implementation runs at approximately 130 cpb on 32-bit x86. With bitslicing, this improves dramatically: bitsliced PRESENT-80/128 achieves 4.73 cpb on Intel Xeon E3-1280 (Sandy Bridge), including data conversion overhead.
+
+**Key optimization techniques:** PRESENT's 4-bit S-box is inherently bitslice-amenable. The vperm (PSHUFB) technique enables a single 128-bit XMM register to implement two vectorized key schedules in parallel using nibble-interleaved packing, nearly halving the schedule cost. The permutation layer is essentially free in bitslice (just register reordering). Multiple blocks must be batched (16 blocks per XMM lane) to fill registers.
+
+**Key reference:** Benadjila et al., "Implementing Lightweight Block Ciphers on x86 Architectures," SAC 2014 (Springer LNCS 8781); Ohkuma, "Lightweight Cryptography for the Cloud: Exploit the Power of Bitslice Implementation," CHES 2012.
+
+---
+
+### 8. SNOW-V
+
+**Best reported performance:** In a single-thread implementation exploiting AES-NI and AVX2/PCLMULQDQ instruction stitching, SNOW-V outperforms AES-256 in all comparable modes of operation for plaintext lengths above 256 bytes, and is roughly 66% faster than AES-256-CTR and 2× faster than ChaCha20.
+
+**Key optimization techniques:** SNOW-V was explicitly co-designed for CPU vectorization. The LFSR state is represented in a "butterfly" structure as two 128-bit register pairs, so field multiplications by α and β can be performed in parallel using 256-bit SIMD, effectively doubling throughput when YMM registers are available. AES round function instructions (AESENC) implement the FSM update with single-cycle latency on modern Intel CPUs. SNOW-Vi is a variant that achieves good performance even without 256-bit registers (SSE2-only environments).
+
+**Key reference:** Ekdahl et al., "A New SNOW Stream Cipher Called SNOW-V," ToSC 2019(3), ePrint 2018/1143; Boström et al., "SNOW-Vi: An Extreme Performance Variant of SNOW-V for Lower Grade CPUs," ePrint 2021/236.
+
+---
+
+### 9. Grain v1
+
+**Best reported performance:** Grain v1 is primarily a hardware-oriented cipher (eSTREAM Profile 2); its 1-bit-per-cycle LFSR/NFSR structure is inherently serial and performs poorly in straightforward software. SUPERCOP benchmarks show ~50–80+ cpb on x86 for the unparallelized reference, though parallel implementations improve this.
+
+**Key optimization techniques:** The dominant technique is word-level parallelism: computing 32 or 64 keystream bits per step by expressing the LFSR/NFSR update as a 32/64-bit XOR-AND chain. This yields a 32× or 64× throughput increase over the bit-serial baseline. Bitslicing multiple independent keystreams using SIMD can also be applied. On FPGA, Grain v1 achieves the worst throughput-to-area ratio among the six stream ciphers studied (ZUC, SNOW 3G, Grain v1, Mickey v2, Trivium, E0), owing to its 1-bit output structure. Software typically targets the word-parallel formulation from the designer's optimized code.
+
+**Key reference:** Hell, Johansson & Meier, "Grain: a stream cipher for constrained environments," IJWMC 2007; ECRYPT/eSTREAM implementation benchmarks (SUPERCOP).
+
+---
+
+### 10. Trivium
+
+**Best reported performance:** eSTREAM performance testing gives bulk encryption speeds of around 4 cpb on x86 platforms using bitslicing — comparing well against the 19 cpb of the AES reference implementation on the same platform.
+
+**Key optimization techniques:** Because no tap appears on the first 65 bits of each shift register, each state bit is not used for at least 65 rounds after generation. This means 64 state bits can be generated in parallel with the same feedback logic, enabling an efficient bitsliced software implementation. In practice, 64 independent keystreams are interleaved into 64-bit registers, amortizing the XOR-AND-shift overhead. The 288-bit state fits comfortably in registers, minimizing memory traffic.
+
+**Key reference:** De Cannière & Preneel, "Trivium Specifications," eSTREAM Phase 3 submission; SUPERCOP benchmarks.
+
+---
+
+### 11. AES-128
+
+**Best reported performance (by implementation class):**
+- **Table-based (T-tables):** ~10–14 cpb (32-bit) to ~5–7 cpb (64-bit), vulnerable to cache-timing attacks.
+- **Bitsliced (8 blocks parallel):** A bitsliced implementation running at 7.59 cpb on Intel Core 2 is simultaneously timing-attack resistant.
+- **AES-NI (scalar):** AES-NI pushes AES-128 to around 1.3 cpb on a single core of Intel i7-6700K.
+- **AES-NI + CTR parallelism:** Using all 16 threads on an Intel i7-10700F, 134.7 Gbps total throughput is achieved; on a single core in parallel modes, ~0.24 cpb is theoretically approached.
+- **VAES + AVX-512 (Ice Lake+):** Vectorized AES instructions (VAES) on Ice Lake architectures enable a theoretical throughput of ~0.16 cpb.
+
+**Key optimization techniques:** AES-NI (AESENC/AESENCLAST) implements a full AES round in a single instruction. Pipelining 8–16 independent CTR-mode blocks in parallel fully utilizes execution ports. The fixslicing technique improves the bitsliced path: fixsliced AES-128 reaches 80 cpb on ARM Cortex-M and 91 cpb on RISC-V E31, improving prior records by 21–26%.
+
+**Key reference:** Gueron & Krasnov, "Making AES Great Again," ePrint 2018/392; Adomnicai & Peyrin, "Fixslicing AES-like Ciphers," TCHES 2021.
+
+---
+
+### 12. Grain-128AEADv2
+
+**Best reported performance:** Grain-128AEADv2 is also LFSR/NFSR-based (128 + 128 bits). The NIST finalist evaluation of Grain-128AEADv2 on ARM Cortex-M0 benchmarks latency, throughput, and memory usage, focusing on optimized assembly implementations. On modern x86, the word-parallel optimized implementation distributed with the NIST submission typically achieves ~20–40 cpb in software, reflecting the inherently sequential feedback structure.
+
+**Key optimization techniques:** Both a reference and an optimized C implementation are distributed with the NIST submission; the reference is bit-serial and unsuitable for benchmarking, while the optimized version uses word-level parallelism and must be used for fair comparison. The authenticator (64-bit accumulator + shift register) adds overhead beyond basic stream cipher cost. Maximov & Hell (ePrint 2020/659) describe implementations specifically tuned for embedded platforms. For Cortex-M0, optimized assembly implementations focus on minimizing RAM footprint (as low as 117 bytes on ATmega128).
+
+**Key reference:** Maximov & Hell, "Software Evaluation of Grain-128AEAD for Embedded Platforms," ePrint 2020/659; Hirose et al., "Performance Evaluation of NIST LWC Finalists on AVR ATmega and ARM Cortex-M3," ePrint 2022/1071.
+
+---
+
+## Summary Table
+
+| Cipher | Best cpb (x86, optimized) | Primary ISA Extension | Technique |
+|---|---|---|---|
+| **SPECK 64/128** | ~1.3–2.0 | AVX2 | ARX parallelism, CTR-mode pipelining |
+| **SIMON 32/64** | ~14–32 (ARM NEON) | NEON / SSE4.2 | SIMD packing, register-minimized key schedule |
+| **ChaCha20** | ~1.0–1.43 | AVX2 / AVX-512 | 4/8-block vectorization, byte-shuffle rotations |
+| **TinyJAMBU-128** | ~4–8 (32-bit C) | 64-bit words | 64-bit state packing, word-parallel NFSR |
+| **Salsa20** | ~3–5 | SSE2 / AVX2 | 4×4 matrix → XMM, counter parallelism |
+| **ZUC-128** | ~1.0 (auth via PCLMULQDQ) | AES-NI + PCLMULQDQ | S-box via AES-NI, CLMUL for MAC |
+| **PRESENT-80** | ~4.73 (bitsliced) | SSE4.1 (PSHUFB) | 16-block bitslicing, vperm S-box |
+| **SNOW-V** | < AES-256-CTR by 66% | AES-NI + AVX2 | Butterfly LFSR, AESENC FSM, instruction stitching |
+| **Grain v1** | ~10–30 (word-parallel) | None (bitwise) | 32/64-bit word-parallel LFSR/NFSR |
+| **Trivium** | ~4 | SSE2 (bitsliced) | 64-instance bitslicing, tap-gap parallelism |
+| **AES-128** | ~0.16–1.3 | AES-NI / VAES+AVX-512 | AESENC pipelining, VAES 4× vectorization |
+| **Grain-128AEADv2** | ~20–40 (word-parallel) | None / scalar | Word-parallel LFSR+NFSR, authenticator overlap |
+
+A few patterns are immediately evident across this corpus that may be relevant to your research context: (1) ARX ciphers (SPECK, ChaCha20, Salsa20) are the clear "software-native" designs, mapping efficiently onto SIMD without special instructions; (2) ciphers that leverage AES-NI (AES-128, SNOW-V, ZUC-128) achieve the lowest cpb on modern x86 due to single-cycle round functions; (3) bitslicing is the dominant technique for S-box-heavy lightweight ciphers (PRESENT-80, Trivium) when AES-NI is inapplicable; and (4) LFSR/NFSR-based stream ciphers (Grain v1, Grain-128AEADv2) remain inherently less competitive in software than in hardware, with word-level parallelism being the primary mitigation.

@@ -12,6 +12,7 @@
 #include "ciphers_enhanced.cuh"
 #include "bruteforce_cpu.hpp"
 #include "bruteforce_gpu_enhanced.cuh"
+#include "cpu_optimized.hpp"
 
 
 // ============================================================
@@ -1480,6 +1481,7 @@ struct Args {
   // Bonus extensions
   bool multi_gpu = false;         // --multi_gpu: enable multi-GPU scaling benchmark
   std::string key_strategy = "";  // --key_strategy <low|high|interleaved|random>
+  bool cpu_opt = false;           // --cpu_opt: run optimized CPU benchmarks for all ciphers
 };
 
 static Args parse_args(int argc, char** argv) {
@@ -1511,6 +1513,7 @@ static Args parse_args(int argc, char** argv) {
     else if (s == "--gpu_only") { a.run_cpu = false; a.run_gpu = true; a.gpu_only = true; }
     else if (s == "--multi_gpu")      a.multi_gpu = true;
     else if (s == "--key_strategy")   a.key_strategy = need("--key_strategy");
+    else if (s == "--cpu_opt")        a.cpu_opt = true;
     else if (s == "--help" || s == "-h") {
       std::cout
         << "Usage: bench [options]\n"
@@ -2108,6 +2111,268 @@ static void benchmark_rocca_s(const Args& a) {
 }
 
 // ============================================================
+// Optimized CPU benchmark: all 14 ciphers, 1..max_bits
+// ============================================================
+
+static void benchmark_all_cpu_opt(const Args& a) {
+  std::cout << "\n=== Optimized CPU Benchmark — All 14 Ciphers ===\n";
+  std::cout << "Techniques: ILP2 for all; circular-buffer for Grain v1 & Trivium; AES-NI ILP4 for AES-128\n";
+  std::cout << "Output CSV: " << a.out_csv << "\n";
+
+  const int repeats = a.cpu_repeats;
+
+  // ---- 1. SIMON 32/64 ----
+  {
+    auto tv = simon_bench_tv();
+    std::cout << "\n[1/14] SIMON 32/64\n";
+    for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+      uint64_t kh = tv.key >> b;
+      auto cr = brute_force_cpu_opt_simon(tv.pt, tv.ct, kh, b, repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "simon32_64,cpu,cpu_optimized_ilp2," << b << "," << cr.keys_tested << ","
+          << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+  }
+
+  // ---- 2. PRESENT-80 ----
+  {
+    auto tv = present_bench_tv();
+    uint64_t key64 = 0;
+    for (int i = 0; i < 8; i++) key64 |= ((uint64_t)tv.key[i]) << (i * 8);
+    std::cout << "\n[2/14] PRESENT-80\n";
+    for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+      uint64_t kh = key64 >> b;
+      auto cr = brute_force_cpu_opt_present(tv.pt, tv.ct, kh, b, repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "present80,cpu,cpu_optimized_ilp2," << b << "," << cr.keys_tested << ","
+          << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+  }
+
+  // ---- 3. SPECK 64/128 ----
+  {
+    auto tv = speck_bench_tv();
+    uint64_t key64 = 0;
+    for (int i = 0; i < 8; i++) key64 |= ((uint64_t)tv.key[i]) << (i * 8);
+    std::cout << "\n[3/14] SPECK 64/128\n";
+    for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+      uint64_t kh = key64 >> b;
+      auto cr = brute_force_cpu_opt_speck(tv.pt, tv.ct, kh, b, repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "speck64_128,cpu,cpu_optimized_ilp2," << b << "," << cr.keys_tested << ","
+          << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+  }
+
+  // ---- 4. Grain v1 (circular-buffer) ----
+  {
+    auto tv = grain_bench_tv();
+    uint64_t key64 = 0;
+    for (int i = 0; i < 8; i++) key64 |= ((uint64_t)tv.key[i]) << (i * 8);
+    std::cout << "\n[4/14] Grain v1 (circular-buffer)\n";
+    for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+      uint64_t kh = key64 >> b;
+      auto cr = brute_force_cpu_opt_grain(tv.pt, tv.ct, tv.iv, tv.length, kh, b, repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "grain_v1,cpu,cpu_optimized_circular," << b << "," << cr.keys_tested << ","
+          << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+  }
+
+  // ---- 5. Trivium (circular-buffer) ----
+  {
+    auto tv = trivium_bench_tv();
+    uint64_t key64 = 0;
+    for (int i = 0; i < 8; i++) key64 |= ((uint64_t)tv.key[i]) << (i * 8);
+    std::cout << "\n[5/14] Trivium (circular-buffer)\n";
+    for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+      uint64_t kh = key64 >> b;
+      auto cr = brute_force_cpu_opt_trivium(tv.pt, tv.ct, tv.iv, tv.length, kh, b, repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "trivium,cpu,cpu_optimized_circular," << b << "," << cr.keys_tested << ","
+          << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+  }
+
+  // ---- 6. ChaCha20 ----
+  {
+    auto tv = chacha_bench_tv();
+    std::cout << "\n[6/14] ChaCha20\n";
+    for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+      uint64_t kh = tv.key64 >> b;
+      auto cr = brute_force_cpu_opt_chacha20(tv.pt, tv.ct, tv.nonce, tv.length, kh, b, repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "chacha20,cpu,cpu_optimized_ilp2," << b << "," << cr.keys_tested << ","
+          << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+  }
+
+  // ---- 7. TinyJAMBU-128 ----
+  {
+    auto tv = tinyjambu_bench_tv();
+    uint64_t key64 = 0;
+    for (int i = 0; i < 8; i++) key64 |= ((uint64_t)tv.key[i]) << (i * 8);
+    std::cout << "\n[7/14] TinyJAMBU-128\n";
+    for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+      uint64_t kh = key64 >> b;
+      auto cr = brute_force_cpu_opt_tinyjambu(tv.pt, tv.ct, tv.nonce, tv.pt_len,
+                                              tv.ad, tv.ad_len, kh, b, repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "tinyjambu_128,cpu,cpu_optimized_ilp2," << b << "," << cr.keys_tested << ","
+          << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+  }
+
+  // ---- 8. ZUC-128 ----
+  {
+    auto tv = zuc_bench_tv();
+    uint64_t key64 = 0;
+    for (int i = 0; i < 8; i++) key64 |= ((uint64_t)tv.key[i]) << (i * 8);
+    std::cout << "\n[8/14] ZUC-128\n";
+    for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+      uint64_t kh = key64 >> b;
+      auto cr = brute_force_cpu_opt_zuc(tv.pt, tv.ct, tv.iv, tv.length, kh, b, repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "zuc_128,cpu,cpu_optimized_ilp2," << b << "," << cr.keys_tested << ","
+          << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+  }
+
+  // ---- 9. SNOW-V ----
+  {
+    auto tv = snow_v_bench_tv();
+    uint64_t key64 = 0;
+    for (int i = 0; i < 8; i++) key64 |= ((uint64_t)tv.key[i]) << (i * 8);
+    std::cout << "\n[9/14] SNOW-V\n";
+    for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+      uint64_t kh = key64 >> b;
+      auto cr = brute_force_cpu_opt_snowv(tv.pt, tv.ct, tv.iv, tv.length, kh, b, repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "snow_v,cpu,cpu_optimized_ilp2," << b << "," << cr.keys_tested << ","
+          << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+  }
+
+  // ---- 10. AES-128 (AES-NI ILP4) ----
+  {
+    auto tv = aes_bench_tv();
+    uint64_t key64 = 0;
+    for (int i = 0; i < 8; i++) key64 |= ((uint64_t)tv.key[i]) << (i * 8);
+    std::cout << "\n[10/14] AES-128 (AES-NI ILP4)\n";
+    for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+      uint64_t kh = key64 >> b;
+      auto cr = brute_force_cpu_opt_aes(tv.pt, tv.ct, kh, b, repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "aes128,cpu,cpu_optimized_aesni_ilp4," << b << "," << cr.keys_tested << ","
+          << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+  }
+
+  // ---- 11. Salsa20 ----
+  {
+    auto tv = salsa20_bench_tv();
+    std::cout << "\n[11/14] Salsa20\n";
+    for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+      uint64_t kh = tv.key64 >> b;
+      auto cr = brute_force_cpu_opt_salsa20(tv.pt, tv.ct, tv.nonce, tv.length, kh, b, repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "salsa20,cpu,cpu_optimized_ilp2," << b << "," << cr.keys_tested << ","
+          << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+  }
+
+  // ---- 12. Grain-128AEADv2 ----
+  {
+    auto tv = grain128aeadv2_bench_tv();
+    uint64_t key64 = 0;
+    for (int i = 0; i < 8; i++) key64 |= ((uint64_t)tv.key[i]) << (i * 8);
+    std::cout << "\n[12/14] Grain-128AEADv2\n";
+    for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+      uint64_t kh = key64 >> b;
+      auto cr = brute_force_cpu_opt_grain128(tv.pt, tv.ct, tv.nonce, tv.pt_len,
+                                             tv.ad, tv.ad_len, kh, b, repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "grain128aeadv2,cpu,cpu_optimized_ilp2," << b << "," << cr.keys_tested << ","
+          << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+  }
+
+  // ---- 13. Rocca ----
+  {
+    auto tv = rocca_bench_tv();
+    uint64_t key64 = 0;
+    for (int i = 0; i < 8; i++) key64 |= ((uint64_t)tv.key[i]) << (i * 8);
+    std::cout << "\n[13/14] Rocca\n";
+    for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+      uint64_t kh = key64 >> b;
+      auto cr = brute_force_cpu_opt_rocca(tv.pt, tv.ct, tv.nonce, kh, b, repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "rocca,cpu,cpu_optimized_ilp2," << b << "," << cr.keys_tested << ","
+          << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+  }
+
+  // ---- 14. Rocca-S ----
+  {
+    auto tv = rocca_s_bench_tv();
+    uint64_t key64 = 0;
+    for (int i = 0; i < 8; i++) key64 |= ((uint64_t)tv.key[i]) << (i * 8);
+    std::cout << "\n[14/14] Rocca-S\n";
+    for (int b = a.min_bits; b <= a.max_bits; b += a.step_bits) {
+      uint64_t kh = key64 >> b;
+      auto cr = brute_force_cpu_opt_rocca_s(tv.pt, tv.ct, tv.nonce, kh, b, repeats);
+      double kps = safe_kps(cr.keys_tested, cr.seconds);
+      std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
+      std::ostringstream row;
+      row << "rocca_s,cpu,cpu_optimized_ilp2," << b << "," << cr.keys_tested << ","
+          << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
+      csv_append_row(a.out_csv, row.str());
+    }
+  }
+
+  std::cout << "\n=== Optimized CPU Benchmark Complete ===\n";
+}
+
+// ============================================================
 // main
 // ============================================================
 
@@ -2177,6 +2442,13 @@ int main(int argc, char** argv) {
   if (a.multi_gpu) {
     benchmark_multi_gpu(a.out_csv, a.min_bits, a.max_bits, a.step_bits,
                         a.blocks, a.threads, a.gpu_repeats);
+    std::cout << "\nDone. Wrote results to " << a.out_csv << "\n";
+    return 0;
+  }
+
+  // Optimized CPU benchmark for all 14 ciphers
+  if (a.cpu_opt) {
+    benchmark_all_cpu_opt(a);
     std::cout << "\nDone. Wrote results to " << a.out_csv << "\n";
     return 0;
   }

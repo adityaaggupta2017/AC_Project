@@ -5,6 +5,7 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
   /home/sahil22430/diffusion_experiments/IP_Project_Crypto/AC_Project/lightweight_ciphers_project_GPU_bruteforce/src/bruteforce_cpu.hpp \
   /home/sahil22430/diffusion_experiments/IP_Project_Crypto/AC_Project/lightweight_ciphers_project_GPU_bruteforce/src/bruteforce_gpu_enhanced.cuh \
   /home/sahil22430/diffusion_experiments/IP_Project_Crypto/AC_Project/lightweight_ciphers_project_GPU_bruteforce/src/ciphers_enhanced.cuh \
+  /home/sahil22430/diffusion_experiments/IP_Project_Crypto/AC_Project/lightweight_ciphers_project_GPU_bruteforce/src/cpu_optimized.hpp \
   /home/sahil22430/diffusion_experiments/IP_Project_Crypto/AC_Project/lightweight_ciphers_project_GPU_bruteforce/src/present_spbox_tables.inc \
   /home/sahil22430/diffusion_experiments/IP_Project_Crypto/AC_Project/lightweight_ciphers_project_GPU_bruteforce/src/util.hpp \
   /usr/include/alloca.h \
@@ -299,11 +300,20 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
   /usr/include/x86_64-linux-gnu/sys/cdefs.h \
   /usr/include/x86_64-linux-gnu/sys/select.h \
   /usr/include/x86_64-linux-gnu/sys/types.h \
+  /usr/lib/gcc/x86_64-linux-gnu/9/include/emmintrin.h \
   /usr/lib/gcc/x86_64-linux-gnu/9/include/limits.h \
+  /usr/lib/gcc/x86_64-linux-gnu/9/include/mm_malloc.h \
+  /usr/lib/gcc/x86_64-linux-gnu/9/include/mmintrin.h \
+  /usr/lib/gcc/x86_64-linux-gnu/9/include/pmmintrin.h \
+  /usr/lib/gcc/x86_64-linux-gnu/9/include/popcntintrin.h \
+  /usr/lib/gcc/x86_64-linux-gnu/9/include/smmintrin.h \
   /usr/lib/gcc/x86_64-linux-gnu/9/include/stdarg.h \
   /usr/lib/gcc/x86_64-linux-gnu/9/include/stddef.h \
   /usr/lib/gcc/x86_64-linux-gnu/9/include/stdint.h \
   /usr/lib/gcc/x86_64-linux-gnu/9/include/syslimits.h \
+  /usr/lib/gcc/x86_64-linux-gnu/9/include/tmmintrin.h \
+  /usr/lib/gcc/x86_64-linux-gnu/9/include/wmmintrin.h \
+  /usr/lib/gcc/x86_64-linux-gnu/9/include/xmmintrin.h \
   /usr/local/cuda-12.0/targets/x86_64-linux/include/builtin_types.h \
   /usr/local/cuda-12.0/targets/x86_64-linux/include/channel_descriptor.h \
   /usr/local/cuda-12.0/targets/x86_64-linux/include/crt/common_functions.h \
@@ -375,8 +385,6 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 
 /usr/local/cuda-12.0/targets/x86_64-linux/include/sm_30_intrinsics.hpp:
 
-/usr/local/cuda-12.0/targets/x86_64-linux/include/sm_20_intrinsics.hpp:
-
 /usr/local/cuda-12.0/targets/x86_64-linux/include/sm_20_atomic_functions.hpp:
 
 /usr/local/cuda-12.0/targets/x86_64-linux/include/sm_20_atomic_functions.h:
@@ -425,7 +433,15 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 
 /usr/lib/gcc/x86_64-linux-gnu/9/include/stdarg.h:
 
+/usr/lib/gcc/x86_64-linux-gnu/9/include/popcntintrin.h:
+
+/usr/local/cuda-12.0/targets/x86_64-linux/include/sm_20_intrinsics.hpp:
+
+/usr/lib/gcc/x86_64-linux-gnu/9/include/mm_malloc.h:
+
 /usr/lib/gcc/x86_64-linux-gnu/9/include/limits.h:
+
+/usr/lib/gcc/x86_64-linux-gnu/9/include/emmintrin.h:
 
 /usr/include/x86_64-linux-gnu/sys/types.h:
 
@@ -485,9 +501,7 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 
 /usr/include/x86_64-linux-gnu/bits/types/sigset_t.h:
 
-/usr/include/c++/9/initializer_list:
-
-/usr/include/x86_64-linux-gnu/bits/stdlib-float.h:
+/usr/include/x86_64-linux-gnu/bits/types/mbstate_t.h:
 
 /usr/include/c++/9/ext/type_traits.h:
 
@@ -496,6 +510,8 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 /usr/include/asm-generic/errno-base.h:
 
 /usr/include/c++/9/ext/numeric_traits.h:
+
+/usr/lib/gcc/x86_64-linux-gnu/9/include/wmmintrin.h:
 
 /usr/include/c++/9/ext/alloc_traits.h:
 
@@ -597,6 +613,8 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 
 /usr/include/c++/9/ratio:
 
+/usr/lib/gcc/x86_64-linux-gnu/9/include/tmmintrin.h:
+
 /usr/include/c++/9/bits/unordered_map.h:
 
 /usr/include/c++/9/cctype:
@@ -619,6 +637,8 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 
 /usr/include/c++/9/ios:
 
+/usr/lib/gcc/x86_64-linux-gnu/9/include/smmintrin.h:
+
 /usr/include/c++/9/math.h:
 
 /usr/local/cuda-12.0/targets/x86_64-linux/include/crt/device_double_functions.h:
@@ -627,19 +647,11 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 
 /home/sahil22430/diffusion_experiments/IP_Project_Crypto/AC_Project/lightweight_ciphers_project_GPU_bruteforce/src/util.hpp:
 
-/usr/include/c++/9/bits/cpp_type_traits.h:
+/usr/include/c++/9/bits/cxxabi_init_exception.h:
 
-/usr/include/c++/9/bits/locale_facets.tcc:
+/usr/include/c++/9/bits/stl_construct.h:
 
-/usr/include/c++/9/random:
-
-/usr/include/c++/9/tr1/poly_hermite.tcc:
-
-/usr/include/x86_64-linux-gnu/bits/thread-shared-types.h:
-
-/usr/include/c++/9/bits/concept_check.h:
-
-/usr/include/c++/9/bits/allocator.h:
+/usr/include/c++/9/bits/localefwd.h:
 
 /usr/include/c++/9/bits/postypes.h:
 
@@ -651,17 +663,19 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 
 /usr/include/c++/9/utility:
 
-/usr/include/c++/9/bits/cxxabi_init_exception.h:
-
-/usr/include/c++/9/bits/stl_construct.h:
-
-/usr/include/c++/9/bits/localefwd.h:
+/usr/include/c++/9/bits/allocator.h:
 
 /usr/include/c++/9/bits/basic_ios.tcc:
 
 /usr/include/c++/9/bits/stl_heap.h:
 
 /usr/include/c++/9/bits/alloc_traits.h:
+
+/usr/lib/gcc/x86_64-linux-gnu/9/include/pmmintrin.h:
+
+/usr/include/c++/9/bits/stl_relops.h:
+
+/usr/include/c++/9/bits/algorithmfwd.h:
 
 /usr/include/x86_64-linux-gnu/c++/9/bits/c++config.h:
 
@@ -685,17 +699,15 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 
 /usr/include/x86_64-linux-gnu/bits/endian.h:
 
+/usr/include/x86_64-linux-gnu/bits/wchar2.h:
+
+/usr/include/x86_64-linux-gnu/bits/fp-logb.h:
+
+/usr/include/x86_64-linux-gnu/bits/wchar.h:
+
+/usr/include/c++/9/backward/auto_ptr.h:
+
 /usr/include/c++/9/bits/char_traits.h:
-
-/usr/include/x86_64-linux-gnu/bits/types/mbstate_t.h:
-
-/usr/include/limits.h:
-
-/usr/include/c++/9/limits:
-
-/usr/include/c++/9/bits/cxxabi_forced.h:
-
-/usr/include/errno.h:
 
 /usr/local/cuda-12.0/targets/x86_64-linux/include/sm_35_intrinsics.h:
 
@@ -707,6 +719,20 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 
 /usr/include/c++/9/bits/node_handle.h:
 
+/usr/include/c++/9/bits/cpp_type_traits.h:
+
+/usr/include/c++/9/bits/locale_facets.tcc:
+
+/usr/include/c++/9/random:
+
+/usr/include/c++/9/tr1/poly_hermite.tcc:
+
+/usr/include/x86_64-linux-gnu/bits/thread-shared-types.h:
+
+/usr/include/c++/9/bits/concept_check.h:
+
+/usr/lib/gcc/x86_64-linux-gnu/9/include/mmintrin.h:
+
 /usr/include/x86_64-linux-gnu/bits/types/__locale_t.h:
 
 /usr/include/c++/9/bits/random.tcc:
@@ -714,6 +740,14 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 /usr/include/x86_64-linux-gnu/bits/fp-fast.h:
 
 /usr/include/c++/9/bits/stl_algobase.h:
+
+/usr/local/cuda-12.0/targets/x86_64-linux/include/sm_32_atomic_functions.hpp:
+
+/usr/include/time.h:
+
+/usr/include/c++/9/bits/hashtable.h:
+
+/usr/include/x86_64-linux-gnu/bits/setjmp.h:
 
 /usr/local/cuda-12.0/targets/x86_64-linux/include/sm_32_atomic_functions.h:
 
@@ -741,15 +775,15 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 
 /usr/include/c++/9/bits/locale_facets.h:
 
-/usr/include/x86_64-linux-gnu/bits/wchar2.h:
-
-/usr/include/x86_64-linux-gnu/bits/fp-logb.h:
-
-/usr/include/x86_64-linux-gnu/bits/wchar.h:
-
-/usr/include/c++/9/backward/auto_ptr.h:
-
 /usr/include/c++/9/bits/ostream_insert.h:
+
+/usr/include/limits.h:
+
+/usr/include/c++/9/limits:
+
+/usr/include/c++/9/bits/cxxabi_forced.h:
+
+/usr/include/errno.h:
 
 /home/sahil22430/diffusion_experiments/IP_Project_Crypto/AC_Project/lightweight_ciphers_project_GPU_bruteforce/src/present_spbox_tables.inc:
 
@@ -805,6 +839,8 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 
 /usr/include/c++/9/numeric:
 
+/home/sahil22430/diffusion_experiments/IP_Project_Crypto/AC_Project/lightweight_ciphers_project_GPU_bruteforce/src/cpu_optimized.hpp:
+
 /usr/include/c++/9/functional:
 
 /usr/include/c++/9/bits/invoke.h:
@@ -823,18 +859,6 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 
 /usr/include/c++/9/stdlib.h:
 
-/usr/include/c++/9/bits/stl_relops.h:
-
-/usr/local/cuda-12.0/targets/x86_64-linux/include/sm_32_atomic_functions.hpp:
-
-/usr/include/c++/9/bits/hashtable.h:
-
-/usr/include/x86_64-linux-gnu/bits/setjmp.h:
-
-/usr/include/time.h:
-
-/usr/include/c++/9/bits/algorithmfwd.h:
-
 /usr/local/cuda-12.0/targets/x86_64-linux/include/sm_60_atomic_functions.hpp:
 
 /usr/include/c++/9/cstdint:
@@ -848,6 +872,10 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 /usr/include/x86_64-linux-gnu/bits/types/__FILE.h:
 
 /usr/include/math.h:
+
+/usr/include/c++/9/initializer_list:
+
+/usr/include/x86_64-linux-gnu/bits/stdlib-float.h:
 
 /usr/include/x86_64-linux-gnu/bits/stdint-intn.h:
 
@@ -942,6 +970,8 @@ CMakeFiles/bench.dir/src/main.cu.o: /home/sahil22430/diffusion_experiments/IP_Pr
 /usr/include/c++/9/bits/stl_function.h:
 
 /usr/include/c++/9/tuple:
+
+/usr/lib/gcc/x86_64-linux-gnu/9/include/xmmintrin.h:
 
 /usr/include/c++/9/clocale:
 

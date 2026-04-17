@@ -1,0 +1,472 @@
+SIMON32/64 Self-Test: PASS
+PRESENT-80 Self-Test: PASS
+SPECK64/128 Self-Test: PASS
+Grain v1 Self-Test: PASS
+Trivium Self-Test: PASS
+ChaCha20 Block Self-Test: PASS
+TinyJAMBU-128 Self-Test: PASS
+TinyJAMBU-128 Bitsliced Self-Test: PASS
+ZUC-128 Self-Test: PASS
+SNOW-V Self-Test: PASS
+AES-128 Self-Test: PASS
+Salsa20 Self-Test: PASS
+Grain-128AEADv2 Self-Test: PASS
+Grain-128AEADv2 Bitsliced Test: PASS
+Rocca Self-Test:     PASS (determinism + key sensitivity + match_first16)
+Rocca-S Self-Test:   PASS (determinism + key sensitivity + match_first16)
+
+=== Optimized CPU Benchmark — All 14 Ciphers ===
+Techniques: ILP2 for all; circular-buffer for Grain v1 & Trivium; AES-NI ILP4 for AES-128
+Output CSV: ../results_CPU_optimizations.csv
+
+[1/14] SIMON 32/64
+  bits=1  1.37e-06 s  1.45985e+06 keys/s
+  bits=2  1.02e-06 s  3.92157e+06 keys/s
+  bits=3  1.85e-06 s  4.32432e+06 keys/s
+  bits=4  3.6e-06 s  4.44444e+06 keys/s
+  bits=5  7.18e-06 s  4.45682e+06 keys/s
+  bits=6  1.431e-05 s  4.4724e+06 keys/s
+  bits=7  2.853e-05 s  4.48651e+06 keys/s
+  bits=8  5.708e-05 s  4.48493e+06 keys/s
+  bits=9  0.00011404 s  4.48965e+06 keys/s
+  bits=10  0.00022833 s  4.48474e+06 keys/s
+  bits=11  0.000456749 s  4.48386e+06 keys/s
+  bits=12  0.00093324 s  4.38901e+06 keys/s
+  bits=13  0.00182686 s  4.4842e+06 keys/s
+  bits=14  0.00365854 s  4.47829e+06 keys/s
+  bits=15  0.00694823 s  4.71602e+06 keys/s
+  bits=16  0.00797902 s  8.21355e+06 keys/s
+  bits=17  0.0160012 s  8.1914e+06 keys/s
+  bits=18  0.0319601 s  8.20224e+06 keys/s
+  bits=19  0.0639189 s  8.20239e+06 keys/s
+  bits=20  0.127855 s  8.20129e+06 keys/s
+  bits=21  0.255691 s  8.20189e+06 keys/s
+  bits=22  0.519326 s  8.07643e+06 keys/s
+  bits=23  1.03399 s  8.11283e+06 keys/s
+  bits=24  2.06689 s  8.11712e+06 keys/s
+  bits=25  4.11646 s  8.15129e+06 keys/s
+  bits=26  8.20207 s  8.18195e+06 keys/s
+  bits=27  16.3846 s  8.19169e+06 keys/s
+  bits=28  32.6887 s  8.21186e+06 keys/s
+  bits=29  65.4057 s  8.20832e+06 keys/s
+  bits=30  130.908 s  8.20224e+06 keys/s
+
+[2/14] PRESENT-80
+  bits=1  1.365e-05 s  146520 keys/s
+  bits=2  2.252e-05 s  177620 keys/s
+  bits=3  4.431e-05 s  180546 keys/s
+  bits=4  9.28e-05 s  172414 keys/s
+  bits=5  0.00018918 s  169151 keys/s
+  bits=6  0.00038767 s  165089 keys/s
+  bits=7  0.000773339 s  165516 keys/s
+  bits=8  0.00156324 s  163762 keys/s
+  bits=9  0.00314271 s  162917 keys/s
+  bits=10  0.00629385 s  162699 keys/s
+  bits=11  0.0125374 s  163351 keys/s
+  bits=12  0.0250079 s  163788 keys/s
+  bits=13  0.0500709 s  163608 keys/s
+  bits=14  0.0999829 s  163868 keys/s
+  bits=15  0.200075 s  163779 keys/s
+  bits=16  0.400161 s  163774 keys/s
+  bits=17  0.800171 s  163805 keys/s
+  bits=18  1.60017 s  163823 keys/s
+  bits=19  3.19987 s  163846 keys/s
+  bits=20  6.4 s  163840 keys/s
+  bits=21  12.8002 s  163838 keys/s
+  bits=22  25.8288 s  162389 keys/s
+  bits=23  51.5568 s  162706 keys/s
+  bits=24  103.203 s  162565 keys/s
+  bits=25  204.844 s  163805 keys/s
+  bits=26  412.724 s  162600 keys/s
+  bits=27  819.471 s  163786 keys/s
+  bits=28  1638.34 s  163846 keys/s
+  bits=29  3277.81 s  163790 keys/s
+  bits=30  6556.55 s  163766 keys/s
+
+[3/14] SPECK 64/128
+  bits=1  2.4e-07 s  8.33333e+06 keys/s
+  bits=2  2.1e-07 s  1.90476e+07 keys/s
+  bits=3  3.1e-07 s  2.58065e+07 keys/s
+  bits=4  5.7e-07 s  2.80702e+07 keys/s
+  bits=5  1.13e-06 s  2.83186e+07 keys/s
+  bits=6  2.231e-06 s  2.86867e+07 keys/s
+  bits=7  4.41e-06 s  2.90249e+07 keys/s
+  bits=8  8.7e-06 s  2.94253e+07 keys/s
+  bits=9  1.7401e-05 s  2.94236e+07 keys/s
+  bits=10  3.476e-05 s  2.94591e+07 keys/s
+  bits=11  6.9531e-05 s  2.94545e+07 keys/s
+  bits=12  0.000138923 s  2.9484e+07 keys/s
+  bits=13  0.000277776 s  2.94914e+07 keys/s
+  bits=14  0.000555612 s  2.94882e+07 keys/s
+  bits=15  0.00111642 s  2.93509e+07 keys/s
+  bits=16  0.00223435 s  2.93311e+07 keys/s
+  bits=17  0.00445277 s  2.94361e+07 keys/s
+  bits=18  0.0089316 s  2.93502e+07 keys/s
+  bits=19  0.0178827 s  2.93182e+07 keys/s
+  bits=20  0.0358996 s  2.92086e+07 keys/s
+  bits=21  0.0721695 s  2.90587e+07 keys/s
+  bits=22  0.144331 s  2.90602e+07 keys/s
+  bits=23  0.288846 s  2.90418e+07 keys/s
+  bits=24  0.577804 s  2.90362e+07 keys/s
+  bits=25  1.1552 s  2.90465e+07 keys/s
+  bits=26  2.31062 s  2.90436e+07 keys/s
+  bits=27  4.61883 s  2.90588e+07 keys/s
+  bits=28  9.21229 s  2.91388e+07 keys/s
+  bits=29  18.3908 s  2.91924e+07 keys/s
+  bits=30  36.7413 s  2.92244e+07 keys/s
+
+[4/14] Grain v1 (circular-buffer)
+  bits=1  5.58e-06 s  358423 keys/s
+  bits=2  8.06e-06 s  496278 keys/s
+  bits=3  1.4831e-05 s  539411 keys/s
+  bits=4  2.841e-05 s  563182 keys/s
+  bits=5  5.5931e-05 s  572134 keys/s
+  bits=6  0.000111062 s  576255 keys/s
+  bits=7  0.000221565 s  577709 keys/s
+  bits=8  0.000443359 s  577410 keys/s
+  bits=9  0.000887177 s  577111 keys/s
+  bits=10  0.00178122 s  574888 keys/s
+  bits=11  0.0035571 s  575750 keys/s
+  bits=12  0.00712741 s  574683 keys/s
+  bits=13  0.0142058 s  576667 keys/s
+  bits=14  0.0284231 s  576433 keys/s
+  bits=15  0.0569416 s  575467 keys/s
+  bits=16  0.113928 s  575239 keys/s
+  bits=17  0.228438 s  573775 keys/s
+  bits=18  0.455207 s  575878 keys/s
+  bits=19  0.90754 s  577702 keys/s
+  bits=20  1.81415 s  577999 keys/s
+  bits=21  3.6166 s  579868 keys/s
+  bits=22  7.23457 s  579759 keys/s
+  bits=23  14.4945 s  578745 keys/s
+  bits=24  28.9266 s  579992 keys/s
+  bits=25  57.7538 s  580991 keys/s
+  bits=26  115.78 s  579624 keys/s
+  bits=27  231.797 s  579030 keys/s
+  bits=28  463.471 s  579185 keys/s
+  bits=29  920.854 s  583014 keys/s
+  bits=30  1842.08 s  582896 keys/s
+
+[5/14] Trivium (circular-buffer)
+  bits=1  7.79e-06 s  256739 keys/s
+  bits=2  1.376e-05 s  290698 keys/s
+  bits=3  2.696e-05 s  296736 keys/s
+  bits=4  5.36e-05 s  298507 keys/s
+  bits=5  0.000107039 s  298956 keys/s
+  bits=6  0.00021377 s  299387 keys/s
+  bits=7  0.000427589 s  299353 keys/s
+  bits=8  0.000862138 s  296936 keys/s
+  bits=9  0.0017199 s  297692 keys/s
+  bits=10  0.00343316 s  298267 keys/s
+  bits=11  0.00687983 s  297682 keys/s
+  bits=12  0.0137425 s  298054 keys/s
+  bits=13  0.0274376 s  298569 keys/s
+  bits=14  0.0548002 s  298977 keys/s
+  bits=15  0.109979 s  297947 keys/s
+  bits=16  0.219704 s  298293 keys/s
+  bits=17  0.439638 s  298136 keys/s
+  bits=18  0.878047 s  298554 keys/s
+  bits=19  1.75584 s  298597 keys/s
+  bits=20  3.51315 s  298472 keys/s
+  bits=21  7.03383 s  298152 keys/s
+  bits=22  14.1103 s  297251 keys/s
+  bits=23  28.3101 s  296311 keys/s
+  bits=24  56.6296 s  296262 keys/s
+  bits=25  112.667 s  297819 keys/s
+  bits=26  225.087 s  298147 keys/s
+  bits=27  451.187 s  297477 keys/s
+  bits=28  900.298 s  298163 keys/s
+  bits=29  1808.32 s  296890 keys/s
+  bits=30  3680.66 s  291725 keys/s
+
+[6/14] ChaCha20
+  bits=1  4.8e-07 s  4.16667e+06 keys/s
+  bits=2  4.7e-07 s  8.51064e+06 keys/s
+  bits=3  8.5e-07 s  9.41176e+06 keys/s
+  bits=4  1.63e-06 s  9.81595e+06 keys/s
+  bits=5  3.17e-06 s  1.00946e+07 keys/s
+  bits=6  6.32e-06 s  1.01266e+07 keys/s
+  bits=7  1.258e-05 s  1.01749e+07 keys/s
+  bits=8  2.519e-05 s  1.01628e+07 keys/s
+  bits=9  5.022e-05 s  1.01951e+07 keys/s
+  bits=10  0.00010063 s  1.01759e+07 keys/s
+  bits=11  0.00020116 s  1.0181e+07 keys/s
+  bits=12  0.0004019 s  1.01916e+07 keys/s
+  bits=13  0.000803061 s  1.0201e+07 keys/s
+  bits=14  0.00161211 s  1.01631e+07 keys/s
+  bits=15  0.00322979 s  1.01455e+07 keys/s
+  bits=16  0.00643137 s  1.019e+07 keys/s
+  bits=17  0.0128756 s  1.01799e+07 keys/s
+  bits=18  0.025721 s  1.01918e+07 keys/s
+  bits=19  0.051778 s  1.01257e+07 keys/s
+  bits=20  0.103863 s  1.00957e+07 keys/s
+  bits=21  0.206274 s  1.01668e+07 keys/s
+  bits=22  0.413238 s  1.01498e+07 keys/s
+  bits=23  0.826225 s  1.01529e+07 keys/s
+  bits=24  1.65244 s  1.0153e+07 keys/s
+  bits=25  3.2961 s  1.01801e+07 keys/s
+  bits=26  6.60466 s  1.01608e+07 keys/s
+  bits=27  13.1631 s  1.01965e+07 keys/s
+  bits=28  26.5239 s  1.01205e+07 keys/s
+  bits=29  53.1208 s  1.01066e+07 keys/s
+  bits=30  105.942 s  1.01352e+07 keys/s
+
+[7/14] TinyJAMBU-128
+  bits=1  2.585e-05 s  77369.4 keys/s
+  bits=2  5.157e-05 s  77564.5 keys/s
+  bits=3  0.00010295 s  77707.6 keys/s
+  bits=4  0.00020573 s  77771.8 keys/s
+  bits=5  0.0004138 s  77332 keys/s
+  bits=6  0.000817589 s  78278.9 keys/s
+  bits=7  0.001659 s  77154.9 keys/s
+  bits=8  0.00329133 s  77780.1 keys/s
+  bits=9  0.00657695 s  77847.7 keys/s
+  bits=10  0.0131854 s  77661.4 keys/s
+  bits=11  0.0263381 s  77758 keys/s
+  bits=12  0.0524665 s  78068.8 keys/s
+  bits=13  0.105273 s  77816.5 keys/s
+  bits=14  0.210314 s  77902.7 keys/s
+  bits=15  0.41853 s  78293 keys/s
+  bits=16  0.837735 s  78230 keys/s
+  bits=17  1.67459 s  78271.2 keys/s
+  bits=18  3.35546 s  78124.6 keys/s
+  bits=19  6.7224 s  77991.2 keys/s
+  bits=20  13.4887 s  77737.2 keys/s
+  bits=21  26.9254 s  77887.6 keys/s
+  bits=22  54.0506 s  77599.6 keys/s
+  bits=23  108.521 s  77299.2 keys/s
+  bits=24  217.606 s  77099 keys/s
+  bits=25  433.983 s  77317.4 keys/s
+  bits=26  870.803 s  77065.5 keys/s
+  bits=27  1733.66 s  77418.5 keys/s
+  bits=28  3423.51 s  78409.4 keys/s
+  bits=29  6767.08 s  79335.7 keys/s
+  bits=30  13525.5 s  79386.7 keys/s
+
+[8/14] ZUC-128
+  bits=1  9.9e-07 s  2.0202e+06 keys/s
+  bits=2  1.38e-06 s  2.89855e+06 keys/s
+  bits=3  2.58e-06 s  3.10078e+06 keys/s
+  bits=4  5.01e-06 s  3.19361e+06 keys/s
+  bits=5  9.94e-06 s  3.21932e+06 keys/s
+  bits=6  1.976e-05 s  3.23887e+06 keys/s
+  bits=7  3.943e-05 s  3.24626e+06 keys/s
+  bits=8  7.8819e-05 s  3.24795e+06 keys/s
+  bits=9  0.0001574 s  3.25286e+06 keys/s
+  bits=10  0.000314679 s  3.25411e+06 keys/s
+  bits=11  0.000629927 s  3.25117e+06 keys/s
+  bits=12  0.00126359 s  3.24157e+06 keys/s
+  bits=13  0.0025216 s  3.24873e+06 keys/s
+  bits=14  0.00504764 s  3.24587e+06 keys/s
+  bits=15  0.0100943 s  3.24618e+06 keys/s
+  bits=16  0.0201818 s  3.24728e+06 keys/s
+  bits=17  0.0403396 s  3.24922e+06 keys/s
+  bits=18  0.0807458 s  3.24653e+06 keys/s
+  bits=19  0.161451 s  3.24734e+06 keys/s
+  bits=20  0.322937 s  3.247e+06 keys/s
+  bits=21  0.645607 s  3.24834e+06 keys/s
+  bits=22  1.29157 s  3.24745e+06 keys/s
+  bits=23  2.58229 s  3.24851e+06 keys/s
+  bits=24  5.16395 s  3.24891e+06 keys/s
+  bits=25  10.3295 s  3.24839e+06 keys/s
+  bits=26  20.6599 s  3.24827e+06 keys/s
+  bits=27  41.3443 s  3.24634e+06 keys/s
+  bits=28  82.6535 s  3.24772e+06 keys/s
+  bits=29  165.34 s  3.24707e+06 keys/s
+  bits=30  330.47 s  3.24914e+06 keys/s
+
+[9/14] SNOW-V
+  bits=1  4.92e-06 s  406504 keys/s
+  bits=2  3.92e-06 s  1.02041e+06 keys/s
+  bits=3  7.46e-06 s  1.07239e+06 keys/s
+  bits=4  1.466e-05 s  1.09141e+06 keys/s
+  bits=5  2.947e-05 s  1.08585e+06 keys/s
+  bits=6  5.856e-05 s  1.0929e+06 keys/s
+  bits=7  0.00011687 s  1.09523e+06 keys/s
+  bits=8  0.000233789 s  1.095e+06 keys/s
+  bits=9  0.000469769 s  1.0899e+06 keys/s
+  bits=10  0.000950527 s  1.0773e+06 keys/s
+  bits=11  0.00190619 s  1.07439e+06 keys/s
+  bits=12  0.00381919 s  1.07248e+06 keys/s
+  bits=13  0.00760386 s  1.07735e+06 keys/s
+  bits=14  0.0152185 s  1.07658e+06 keys/s
+  bits=15  0.0304259 s  1.07698e+06 keys/s
+  bits=16  0.0609173 s  1.07582e+06 keys/s
+  bits=17  0.121863 s  1.07557e+06 keys/s
+  bits=18  0.243671 s  1.07581e+06 keys/s
+  bits=19  0.487601 s  1.07524e+06 keys/s
+  bits=20  0.974583 s  1.07592e+06 keys/s
+  bits=21  1.94882 s  1.07611e+06 keys/s
+  bits=22  3.89803 s  1.07601e+06 keys/s
+  bits=23  7.81228 s  1.07377e+06 keys/s
+  bits=24  15.5901 s  1.07614e+06 keys/s
+  bits=25  31.1838 s  1.07602e+06 keys/s
+  bits=26  62.3845 s  1.07573e+06 keys/s
+  bits=27  124.777 s  1.07566e+06 keys/s
+  bits=28  249.542 s  1.07571e+06 keys/s
+  bits=29  500.32 s  1.07306e+06 keys/s
+  bits=30  998.176 s  1.0757e+06 keys/s
+
+[10/14] AES-128 (AES-NI ILP4)
+  bits=1  7.3e-07 s  2.73973e+06 keys/s
+  bits=2  2.2e-07 s  1.81818e+07 keys/s
+  bits=3  2e-07 s  4e+07 keys/s
+  bits=4  3.5e-07 s  4.57143e+07 keys/s
+  bits=5  6.5e-07 s  4.92308e+07 keys/s
+  bits=6  1.24e-06 s  5.16129e+07 keys/s
+  bits=7  2.43e-06 s  5.26749e+07 keys/s
+  bits=8  4.85e-06 s  5.27835e+07 keys/s
+  bits=9  9.66e-06 s  5.30021e+07 keys/s
+  bits=10  1.929e-05 s  5.30845e+07 keys/s
+  bits=11  3.854e-05 s  5.31396e+07 keys/s
+  bits=12  7.705e-05 s  5.31603e+07 keys/s
+  bits=13  0.000154069 s  5.3171e+07 keys/s
+  bits=14  0.000313389 s  5.22801e+07 keys/s
+  bits=15  0.000616189 s  5.31785e+07 keys/s
+  bits=16  0.00123679 s  5.2989e+07 keys/s
+  bits=17  0.00247522 s  5.29536e+07 keys/s
+  bits=18  0.00494553 s  5.30063e+07 keys/s
+  bits=19  0.00988586 s  5.30341e+07 keys/s
+  bits=20  0.0197453 s  5.31052e+07 keys/s
+  bits=21  0.0395324 s  5.30489e+07 keys/s
+  bits=22  0.0791359 s  5.30013e+07 keys/s
+  bits=23  0.15823 s  5.30154e+07 keys/s
+  bits=24  0.316135 s  5.30698e+07 keys/s
+  bits=25  0.632178 s  5.30775e+07 keys/s
+  bits=26  1.2645 s  5.30716e+07 keys/s
+  bits=27  2.52912 s  5.3069e+07 keys/s
+  bits=28  5.05802 s  5.30713e+07 keys/s
+  bits=29  10.1151 s  5.3076e+07 keys/s
+  bits=30  20.2333 s  5.3068e+07 keys/s
+
+[11/14] Salsa20
+  bits=1  4.8e-07 s  4.16667e+06 keys/s
+  bits=2  4.8e-07 s  8.33333e+06 keys/s
+  bits=3  8.4e-07 s  9.52381e+06 keys/s
+  bits=4  1.65e-06 s  9.69697e+06 keys/s
+  bits=5  3.23e-06 s  9.90712e+06 keys/s
+  bits=6  6.41e-06 s  9.9844e+06 keys/s
+  bits=7  1.278e-05 s  1.00156e+07 keys/s
+  bits=8  2.5269e-05 s  1.0131e+07 keys/s
+  bits=9  5.085e-05 s  1.00688e+07 keys/s
+  bits=10  0.00010184 s  1.0055e+07 keys/s
+  bits=11  0.000203179 s  1.00798e+07 keys/s
+  bits=12  0.000406579 s  1.00743e+07 keys/s
+  bits=13  0.000821857 s  9.96767e+06 keys/s
+  bits=14  0.00162712 s  1.00693e+07 keys/s
+  bits=15  0.00324084 s  1.0111e+07 keys/s
+  bits=16  0.00652784 s  1.00395e+07 keys/s
+  bits=17  0.013043 s  1.00492e+07 keys/s
+  bits=18  0.026019 s  1.00751e+07 keys/s
+  bits=19  0.05203 s  1.00767e+07 keys/s
+  bits=20  0.104256 s  1.00577e+07 keys/s
+  bits=21  0.208782 s  1.00447e+07 keys/s
+  bits=22  0.417381 s  1.00491e+07 keys/s
+  bits=23  0.83503 s  1.00459e+07 keys/s
+  bits=24  1.66762 s  1.00606e+07 keys/s
+  bits=25  3.33724 s  1.00545e+07 keys/s
+  bits=26  6.6723 s  1.00578e+07 keys/s
+  bits=27  13.3473 s  1.00558e+07 keys/s
+  bits=28  26.6759 s  1.00628e+07 keys/s
+  bits=29  53.3442 s  1.00643e+07 keys/s
+  bits=30  106.704 s  1.00628e+07 keys/s
+
+[12/14] Grain-128AEADv2
+  bits=1  1.415e-05 s  141343 keys/s
+  bits=2  2.395e-05 s  167015 keys/s
+  bits=3  4.566e-05 s  175208 keys/s
+  bits=4  8.9219e-05 s  179334 keys/s
+  bits=5  0.00017635 s  181457 keys/s
+  bits=6  0.000350909 s  182383 keys/s
+  bits=7  0.000705248 s  181496 keys/s
+  bits=8  0.00140574 s  182111 keys/s
+  bits=9  0.00280196 s  182729 keys/s
+  bits=10  0.0056117 s  182476 keys/s
+  bits=11  0.0112158 s  182600 keys/s
+  bits=12  0.0231683 s  176793 keys/s
+  bits=13  0.0449249 s  182349 keys/s
+  bits=14  0.0898135 s  182422 keys/s
+  bits=15  0.179711 s  182337 keys/s
+  bits=16  0.359252 s  182424 keys/s
+  bits=17  0.718515 s  182421 keys/s
+  bits=18  1.43676 s  182454 keys/s
+  bits=19  2.87298 s  182489 keys/s
+  bits=20  5.73829 s  182733 keys/s
+  bits=21  11.4753 s  182753 keys/s
+  bits=22  22.9536 s  182730 keys/s
+  bits=23  45.876 s  182854 keys/s
+  bits=24  91.7348 s  182888 keys/s
+  bits=25  183.4 s  182958 keys/s
+  bits=26  366.87 s  182923 keys/s
+  bits=27  733.588 s  182961 keys/s
+  bits=28  1467.35 s  182939 keys/s
+  bits=29  2935.46 s  182892 keys/s
+  bits=30  5873.3 s  182817 keys/s
+
+[13/14] Rocca
+  bits=1  4.07e-06 s  491400 keys/s
+  bits=2  6.05e-06 s  661157 keys/s
+  bits=3  1.185e-05 s  675105 keys/s
+  bits=4  2.356e-05 s  679117 keys/s
+  bits=5  4.695e-05 s  681576 keys/s
+  bits=6  9.3759e-05 s  682601 keys/s
+  bits=7  0.000187298 s  683403 keys/s
+  bits=8  0.000374267 s  684004 keys/s
+  bits=9  0.000753063 s  679890 keys/s
+  bits=10  0.00150284 s  681378 keys/s
+  bits=11  0.00300772 s  680914 keys/s
+  bits=12  0.006 s  682667 keys/s
+  bits=13  0.0119919 s  683126 keys/s
+  bits=14  0.0239992 s  682690 keys/s
+  bits=15  0.048001 s  682653 keys/s
+  bits=16  0.0960411 s  682375 keys/s
+  bits=17  0.19209 s  682347 keys/s
+  bits=18  0.383791 s  683039 keys/s
+  bits=19  0.767847 s  682803 keys/s
+  bits=20  1.53681 s  682305 keys/s
+  bits=21  3.07076 s  682943 keys/s
+  bits=22  6.14367 s  682703 keys/s
+  bits=23  12.2852 s  682823 keys/s
+  bits=24  24.5715 s  682792 keys/s
+  bits=25  49.127 s  683014 keys/s
+  bits=26  98.2762 s  682860 keys/s
+  bits=27  196.54 s  682902 keys/s
+  bits=28  393.125 s  682825 keys/s
+  bits=29  786.175 s  682890 keys/s
+  bits=30  1579.13 s  679958 keys/s
+
+[14/14] Rocca-S
+  bits=1  4.66e-06 s  429185 keys/s
+  bits=2  7.6e-06 s  526316 keys/s
+  bits=3  1.497e-05 s  534402 keys/s
+  bits=4  2.983e-05 s  536373 keys/s
+  bits=5  5.96e-05 s  536913 keys/s
+  bits=6  0.000119189 s  536962 keys/s
+  bits=7  0.000238209 s  537343 keys/s
+  bits=8  0.000476348 s  537422 keys/s
+  bits=9  0.000957975 s  534461 keys/s
+  bits=10  0.00191251 s  535422 keys/s
+  bits=11  0.00382529 s  535384 keys/s
+  bits=12  0.00763722 s  536321 keys/s
+  bits=13  0.0152683 s  536537 keys/s
+  bits=14  0.0305762 s  535842 keys/s
+  bits=15  0.0611728 s  535663 keys/s
+  bits=16  0.122385 s  535490 keys/s
+  bits=17  0.244709 s  535624 keys/s
+  bits=18  0.489117 s  535954 keys/s
+  bits=19  0.97834 s  535895 keys/s
+  bits=20  1.97671 s  530465 keys/s
+  bits=21  3.9116 s  536136 keys/s
+  bits=22  7.82233 s  536196 keys/s
+  bits=23  15.6426 s  536266 keys/s
+  bits=24  31.2877 s  536224 keys/s
+  bits=25  62.5552 s  536397 keys/s
+  bits=26  125.14 s  536269 keys/s
+  bits=27  250.273 s  536285 keys/s
+  bits=28  500.53 s  536302 keys/s
+  bits=29  1001 s  536335 keys/s
+  bits=30  2002.72 s  536141 keys/s
+
+=== Optimized CPU Benchmark Complete ===
+
+Done. Wrote results to ../results_CPU_optimizations.csv
