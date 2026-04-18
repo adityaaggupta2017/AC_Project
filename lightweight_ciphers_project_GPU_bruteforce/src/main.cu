@@ -2185,13 +2185,13 @@ static void benchmark_all_cpu_opt(const Args& a) {
       double kps = safe_kps(cr.keys_tested, cr.seconds);
       std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
       std::ostringstream row;
-      row << "grain_v1,cpu,cpu_optimized_circular," << b << "," << cr.keys_tested << ","
+      row << "grain_v1,cpu,cpu_optimized_wp," << b << "," << cr.keys_tested << ","
           << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
       csv_append_row(a.out_csv, row.str());
     }
   }
 
-  // ---- 5. Trivium (circular-buffer) ----
+  // ---- 5. Trivium (word-parallel WP) ----
   {
     auto tv = trivium_bench_tv();
     uint64_t key64 = 0;
@@ -2203,7 +2203,7 @@ static void benchmark_all_cpu_opt(const Args& a) {
       double kps = safe_kps(cr.keys_tested, cr.seconds);
       std::cout << "  bits=" << b << "  " << cr.seconds << " s  " << kps << " keys/s\n";
       std::ostringstream row;
-      row << "trivium,cpu,cpu_optimized_circular," << b << "," << cr.keys_tested << ","
+      row << "trivium,cpu,cpu_optimized_wp," << b << "," << cr.keys_tested << ","
           << cr.seconds << "," << kps << "," << u64_hex(cr.found ? cr.found_key : 0);
       csv_append_row(a.out_csv, row.str());
     }
